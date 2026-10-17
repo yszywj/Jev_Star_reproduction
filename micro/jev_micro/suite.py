@@ -42,6 +42,10 @@ def result_row(map_name, policy, output, returncode):
         "development_map": map_name in DEVELOPMENT_MAPS,
         "planner_result": summary.get("planner_result"),
         "planner_fixed_step_checks": summary.get("planner_fixed_step_checks", 0),
+        "skill_mode": summary.get("skill_mode", "off"),
+        "skill_activations": (summary.get("skill") or {}).get("activations", 0),
+        "skill_steps": (summary.get("skill") or {}).get("steps", 0),
+        "skill_terminations": (summary.get("skill") or {}).get("terminations", {}),
     }
 
 
@@ -57,7 +61,9 @@ def save_report(output, settings, results, startup_failed=False):
                "wins": sum(r["wins"] for r in results),
                "estimated_api_cost_usd": round(sum(r["estimated_api_cost_usd"] for r in results), 9),
                "excluded_attempt_cost_usd": round(excluded_cost, 9),
-               "total_cost_including_excluded_usd": round(sum(r["estimated_api_cost_usd"] for r in results) + excluded_cost, 9)}
+               "total_cost_including_excluded_usd": round(sum(r["estimated_api_cost_usd"] for r in results) + excluded_cost, 9),
+               "skill_activations": sum(r.get("skill_activations", 0) for r in results),
+               "skill_steps": sum(r.get("skill_steps", 0) for r in results)}
     write_json(output / "summary.json", summary)
     lines = ["# SMAC-Hard map smoke tests", "",
              "Base opponent, shared team vision, fixed-step simulation, abilities disabled. Three episodes per map are exploratory results, not reliable win-rate estimates.", "",
@@ -94,6 +100,13 @@ def main():
     parser.add_argument("--max-requests", type=int, help="Per-map limit; otherwise derived from map step limit and maximum unit batches")
     parser.add_argument("--batch-concurrency", type=int, default=4)
     parser.add_argument("--api-retries", type=int, default=2)
+    parser.add_argument("--skill-mode", choices=["off", "always", "jev"], default="off")
+    parser.add_argument("--skill-max-steps", type=int, default=4)
+    parser.add_argument("--skill-name", choices=["focus_fire_budget", "cover_retreat", "heal_assign"],
+                        default="focus_fire_budget")
+    parser.add_argument("--heal-switch-margin", type=float, default=0.15)
+    parser.add_argument("--cover-risk-threshold", type=float, default=0.35)
+    parser.add_argument("--cover-safe-streak", type=int, default=2)
     parser.add_argument("--sc2-path", type=Path, default=Path(os.environ.get("SC2PATH", r"C:\game\StarCraft II")))
     parser.add_argument("--config-file", type=Path, default=REPO.parent / "config.md")
     parser.add_argument("--output-dir", type=Path)
@@ -119,7 +132,9 @@ def main():
     suite_file = output / "suite.json"
     if args.resume and suite_file.exists():
         previous = json.loads(suite_file.read_text(encoding="utf-8"))
-        for key in ("maps", "policies", "episodes", "seed", "step_mul", "model", "opponent"):
+        for key in ("maps", "policies", "episodes", "seed", "step_mul", "model", "opponent",
+                    "skill_mode", "skill_max_steps", "skill_name",
+                    "cover_risk_threshold", "cover_safe_streak", "heal_switch_margin"):
             if previous.get(key) != settings.get(key):
                 parser.error(f"Resume settings differ: {key}")
         if previous.get("planner", "none") != settings["planner"]:
@@ -164,7 +179,12 @@ def main():
                        "--request-timeout", str(args.request_timeout),
                        "--max-requests", str(max_requests), "--sc2-path", str(args.sc2_path),
                        "--batch-concurrency", str(args.batch_concurrency), "--api-retries", str(args.api_retries),
-                       "--config-file", str(args.config_file.resolve()), "--output-dir", str(case_output)]
+                       "--config-file", str(args.config_file.resolve()), "--output-dir", str(case_output),
+                       "--skill-mode", args.skill_mode, "--skill-max-steps", str(args.skill_max_steps),
+                       "--skill-name", args.skill_name,
+                       "--cover-risk-threshold", str(args.cover_risk_threshold),
+                       "--cover-safe-streak", str(args.cover_safe_streak),
+                       "--heal-switch-margin", str(args.heal_switch_margin)]
             if args.planner == "codex" and policy == "jev":
                 command.extend(["--planner", "codex", "--planner-model", args.planner_model,
                                 "--planner-effort", args.planner_effort,

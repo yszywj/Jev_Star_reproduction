@@ -2,6 +2,7 @@
 
 import argparse
 import asyncio
+import copy
 import hashlib
 import json
 import os
@@ -19,6 +20,8 @@ from .environment import JevMicroEnv, opponent_for
 from .planner import MapPlanner, HIERARCHY_SCHEMA_VERSION, attach_plan, add_planner_arguments
 from .feedback import action_feedback
 from .scenario import BRIEF_VERSION, build_scenario_brief
+from .skill_manager import SkillManager
+from .skill_policy import COVER_RETREAT, FOCUS_FIRE_BUDGET, HEAL_ASSIGN, decode_skill, skill_request
 
 
 REPO = Path(__file__).resolve().parents[1]
@@ -100,6 +103,9 @@ async def run(args, api_key):
                     connection_mode="local_sc2_api", **installation_info(args.sc2_path))
     source_files = ("jev_micro/client.py", "jev_micro/policy.py", "jev_micro/run.py", "jev_micro/planner.py",
                     "jev_micro/catalog.py", "jev_micro/environment.py", "jev_micro/scenario.py", "jev_micro/feedback.py",
+                    "jev_micro/skills/focus_fire.py", "jev_micro/skills/cover_retreat.py",
+                    "jev_micro/skills/heal_assign.py",
+                    "jev_micro/skill_policy.py", "jev_micro/skill_manager.py",
                     "smac_hard/env/starcraft2/starcraft2.py", "pysc2/lib/remote_controller.py")
     settings["source_sha256"] = {p: hashlib.sha256((REPO / p).read_bytes()).hexdigest() for p in source_files}
     write_json(output / "run.json", settings)
@@ -114,6 +120,9 @@ async def run(args, api_key):
     env = JevMicroEnv(map_name=args.map, step_mul=args.step_mul, seed=args.seed,
                       use_ability=False, continuing_episode=True)
     client = JevClient(api_key, args.request_timeout) if args.policy == "jev" else None
+    skill_manager = SkillManager(args.skill_max_steps, risk_threshold=args.cover_risk_threshold,
+                                 safe_streak_required=args.cover_safe_streak,
+                                 heal_switch_margin=args.heal_switch_margin)
     episodes, latencies = [], []
     requests = input_tokens = output_tokens = api_errors = action_errors = 0
     fixed_step_checks = 0
@@ -122,6 +131,62 @@ async def run(args, api_key):
     started = time.monotonic()
     failure = None
     semaphore = asyncio.Semaphore(args.batch_concurrency)
+
+    def emit_heal_events(telemetry, episode, step, started=False, selected=False):
+        """HealAssign-specific events; harmless no-op for other skills."""
+        if telemetry.get("skill") != "heal_assign":
+            return
+        if selected:
+            emit("heal_skill_selected", episode=episode, step=step)
+        if started:
+            emit("heal_skill_started", episode=episode, step=step)
+        emit("heal_skill_step", episode=episode, step=step,
+             healers=telemetry.get("healers", []), wounded_targets=telemetry.get("wounded_targets", []),
+             assignments=telemetry.get("assignments", {}),
+             urgency=telemetry.get("urgency", {}), missing_health=telemetry.get("missing_health", {}),
+             healer_energy=telemetry.get("healer_energy", {}),
+             retained_orders=telemetry.get("retained_orders", {}),
+             self_preserving=telemetry.get("self_preserving", {}),
+             unassigned_healers=telemetry.get("unassigned_healers", []))
+        if telemetry.get("assignments"):
+            emit("heal_assignment_created", episode=episode, step=step,
+                 assignments=telemetry["assignments"])
+        if telemetry.get("target_switches"):
+            emit("heal_assignment_changed", episode=episode, step=step,
+                 assignments=telemetry["assignments"], switches=telemetry["target_switches"])
+        if telemetry.get("partial_actions"):
+            emit("heal_action_issued", episode=episode, step=step,
+                 actions=telemetry["partial_actions"],
+                 retained_orders=telemetry.get("retained_orders", {}))
+        if telemetry.get("released"):
+            emit("heal_assignment_released", episode=episode, step=step,
+                 released=telemetry["released"], reason=telemetry.get("release_reason", "retargeted"))
+        if "termination_reason" in telemetry:
+            emit("heal_skill_terminated", episode=episode, step=step,
+                 reason=telemetry["termination_reason"],
+                 elapsed_steps=telemetry.get("skill_step"))
+
+    def emit_cover_events(telemetry, episode, step, started=False):
+        """CoverRetreat-specific events; harmless no-op for other skills."""
+        if telemetry.get("skill") != "cover_retreat":
+            return
+        if started:
+            emit("cover_retreat_started", episode=episode, step=step)
+        emit("cover_retreat_step", episode=episode, step=step,
+             risks=telemetry["risks"], retreat_units=telemetry["retreat_units"],
+             cover_units=telemetry["cover_units"], safe_streak=telemetry["safe_streak"],
+             skill_step=telemetry["skill_step"])
+        emit("cover_roles_updated", episode=episode, step=step,
+             retreat_units=telemetry["retreat_units"], cover_units=telemetry["cover_units"],
+             other_units=telemetry["other_units"])
+        if telemetry.get("retreat_direction") is not None:
+            emit("retreat_direction_selected", episode=episode, step=step,
+                 retreat_units=telemetry["retreat_units"],
+                 direction_action=telemetry["retreat_direction"])
+        if "termination_reason" in telemetry:
+            emit("cover_retreat_terminated", episode=episode, step=step,
+                 reason=telemetry["termination_reason"],
+                 elapsed_steps=telemetry["skill_step"], safe_streak=telemetry["safe_streak"])
 
     async def fetch_batch(payload, episode, step, batch_id, record):
         nonlocal requests, input_tokens, output_tokens, api_errors
@@ -164,6 +229,8 @@ async def run(args, api_key):
             episode_dir = output / f"episode-{episode:03d}"
             episode_dir.mkdir()
             episode_start = time.monotonic()
+            skill_baseline = copy.deepcopy(skill_manager.stats)
+            skill_manager.reset()
             record = {"episode": episode, "policy": args.policy, "status": "starting",
                       "steps": 0, "requests": 0, "reward": 0.0, "input_tokens": 0, "output_tokens": 0}
             ready = False
@@ -212,30 +279,117 @@ async def run(args, api_key):
                     if not payload["questions"]:
                         raise RuntimeError("No live units without an environment terminal result.")
                     emit("observation", episode=episode, step=record["steps"], payload=payload)
-                    if client is not None:
-                        batches = batch_requests(payload)
-                        request_start = time.monotonic()
-                        responses = await asyncio.gather(*(fetch_batch(batch, episode, record["steps"], i, record)
-                                                          for i, batch in enumerate(batches)), return_exceptions=True)
-                        errors = [r for r in responses if isinstance(r, BaseException)]
-                        if errors:
-                            raise errors[0]
-                        answers = {actor: answer for response in responses for actor, answer in response["answers"].items()}
-                        actions = decode_actions(payload, answers, env.n_agents)
-                        usage = {key: sum(r["usage"].get(key, 0) for r in responses)
-                                 for key in ("input_tokens", "output_tokens")}
-                        emit("decision", episode=episode, step=record["steps"], batch_count=len(batches),
-                             latency_ms=(time.monotonic() - request_start) * 1000, actions=actions,
-                             model=responses[0]["model"], answers=answers, usage=usage)
-                        # Read the actual SC2 clock; don't infer paused time from a cached snapshot.
-                        fresh, abilities = env._controllers[0].observe()
-                        if fresh.observation.game_loop != observation_loop:
-                            raise RuntimeError("SC2 advanced while waiting for Jev in fixed-step mode.")
-                        env._obs, env._ability = fresh, abilities
-                        fixed_step_checks += 1
-                    else:
-                        actions = nearest_actions(payload, env.n_agents)
-                        emit("decision", episode=episode, step=record["steps"], actions=actions, policy="nearest")
+                    actions = None
+                    heal_partial = None
+                    if args.skill_mode == "always":
+                        # Free local validation of the allocator; no model calls.
+                        always_skill = {"cover_retreat": COVER_RETREAT,
+                                        "heal_assign": HEAL_ASSIGN}.get(args.skill_name, FOCUS_FIRE_BUDGET)
+                        if not skill_manager.active:
+                            skill_manager.select(always_skill)
+                            emit("skill_started", episode=episode, step=record["steps"],
+                                 skill=always_skill,
+                                 activation=skill_manager.stats["activations"])
+                            if always_skill == COVER_RETREAT:
+                                emit("cover_retreat_started", episode=episode, step=record["steps"])
+                            if always_skill == HEAL_ASSIGN:
+                                emit_heal_events({"skill": "heal_assign"}, episode,
+                                                 record["steps"], started=True)
+                        if always_skill == HEAL_ASSIGN:
+                            # HealAssign controls healer slots only; the declared
+                            # deterministic nearest baseline fills every other unit.
+                            heal_partial, skill_telemetry = skill_manager.step(payload, env.n_agents)
+                            emit("skill_step", episode=episode, step=record["steps"], **skill_telemetry)
+                            emit_heal_events(skill_telemetry, episode, record["steps"])
+                            if "termination_reason" in skill_telemetry:
+                                emit("skill_terminated", episode=episode, step=record["steps"],
+                                     reason=skill_telemetry["termination_reason"],
+                                     elapsed_steps=skill_telemetry["skill_step"])
+                        else:
+                            actions, skill_telemetry = skill_manager.step(payload, env.n_agents)
+                            emit("skill_step", episode=episode, step=record["steps"], **skill_telemetry)
+                            emit_cover_events(skill_telemetry, episode, record["steps"])
+                            if "termination_reason" in skill_telemetry:
+                                emit("skill_terminated", episode=episode, step=record["steps"],
+                                     reason=skill_telemetry["termination_reason"],
+                                     elapsed_steps=skill_telemetry["skill_step"])
+                    elif args.skill_mode == "jev":
+                        if skill_manager.mode_remaining == 0:
+                            skill_payload = skill_request(payload, args.model, args.skill_max_steps)
+                            response = await fetch_batch(skill_payload, episode, record["steps"],
+                                                        "team_skill", record)
+                            skill_choice, skill_priority = decode_skill(skill_payload, response["answers"])
+                            skill_manager.select(skill_choice, priority_target=skill_priority)
+                            emit("skill_selected", episode=episode, step=record["steps"],
+                                 skill=skill_choice, priority_target=skill_priority,
+                                 window_steps=args.skill_max_steps)
+                            if skill_choice == COVER_RETREAT:
+                                emit("cover_retreat_selected", episode=episode, step=record["steps"])
+                            if skill_choice == HEAL_ASSIGN:
+                                emit_heal_events({"skill": "heal_assign"}, episode,
+                                                 record["steps"], selected=True)
+                            # Same fixed-step guard as per-unit JEV decisions.
+                            fresh, abilities = env._controllers[0].observe()
+                            if fresh.observation.game_loop != observation_loop:
+                                raise RuntimeError("SC2 advanced while waiting for Jev in fixed-step mode.")
+                            env._obs, env._ability = fresh, abilities
+                            fixed_step_checks += 1
+                        skill_manager.spend_mode_step()
+                        if skill_manager.current_skill == HEAL_ASSIGN and skill_manager.active:
+                            # Healers run HealAssign; every other unit keeps the
+                            # original per-unit JEV decision (billed and logged).
+                            heal_partial, skill_telemetry = skill_manager.step(payload, env.n_agents)
+                            emit("skill_step", episode=episode, step=record["steps"], **skill_telemetry)
+                            emit_heal_events(skill_telemetry, episode, record["steps"])
+                            if "termination_reason" in skill_telemetry:
+                                emit("skill_terminated", episode=episode, step=record["steps"],
+                                     reason=skill_telemetry["termination_reason"],
+                                     elapsed_steps=skill_telemetry["skill_step"])
+                        elif skill_manager.active:
+                            previous_assignments = dict(skill_manager.target_assignments)
+                            actions, skill_telemetry = skill_manager.step(payload, env.n_agents)
+                            emit("skill_step", episode=episode, step=record["steps"], **skill_telemetry)
+                            emit_cover_events(skill_telemetry, episode, record["steps"])
+                            if skill_telemetry.get("reassigned"):
+                                emit("skill_reassigned", episode=episode, step=record["steps"],
+                                     previous=previous_assignments,
+                                     current=skill_telemetry["target_assignments"])
+                            if "termination_reason" in skill_telemetry:
+                                emit("skill_terminated", episode=episode, step=record["steps"],
+                                     reason=skill_telemetry["termination_reason"],
+                                     elapsed_steps=skill_telemetry["skill_step"])
+                    if actions is None:
+                        if client is not None:
+                            batches = batch_requests(payload)
+                            request_start = time.monotonic()
+                            responses = await asyncio.gather(*(fetch_batch(batch, episode, record["steps"], i, record)
+                                                              for i, batch in enumerate(batches)), return_exceptions=True)
+                            errors = [r for r in responses if isinstance(r, BaseException)]
+                            if errors:
+                                raise errors[0]
+                            answers = {actor: answer for response in responses for actor, answer in response["answers"].items()}
+                            actions = decode_actions(payload, answers, env.n_agents)
+                            usage = {key: sum(r["usage"].get(key, 0) for r in responses)
+                                     for key in ("input_tokens", "output_tokens")}
+                            emit("decision", episode=episode, step=record["steps"], batch_count=len(batches),
+                                 latency_ms=(time.monotonic() - request_start) * 1000, actions=actions,
+                                 model=responses[0]["model"], answers=answers, usage=usage)
+                            # Read the actual SC2 clock; don't infer paused time from a cached snapshot.
+                            fresh, abilities = env._controllers[0].observe()
+                            if fresh.observation.game_loop != observation_loop:
+                                raise RuntimeError("SC2 advanced while waiting for Jev in fixed-step mode.")
+                            env._obs, env._ability = fresh, abilities
+                            fixed_step_checks += 1
+                        else:
+                            actions = nearest_actions(payload, env.n_agents)
+                            emit("decision", episode=episode, step=record["steps"], actions=actions, policy="nearest")
+                    if heal_partial is not None:
+                        # One final action per unit: healer slots come from
+                        # HealAssign, everything else from the declared base.
+                        actions = [heal_partial.get(i, action) for i, action in enumerate(actions)]
+                        emit("skill_merge", episode=episode, step=record["steps"],
+                             skill="heal_assign", overridden_slots=sorted(heal_partial),
+                             base_policy=("jev" if client is not None else "nearest"))
                     for i, action in enumerate(actions):
                         if not env.get_avail_agent_actions(i)[action]:
                             raise RuntimeError(f"Action for u{i} failed execution-time validation.")
@@ -283,6 +437,28 @@ async def run(args, api_key):
             finally:
                 record["wall_seconds"] = round(time.monotonic() - episode_start, 3)
                 record["estimated_api_cost_usd"] = round(record["input_tokens"] * 0.042 / 1_000_000, 9)
+                stats, base = skill_manager.stats, skill_baseline
+                record["skill"] = {
+                    "mode": args.skill_mode,
+                    "activations": stats["activations"] - base["activations"],
+                    "steps": stats["steps"] - base["steps"],
+                    "mean_steps_per_activation": (round((stats["steps"] - base["steps"])
+                                                         / (stats["activations"] - base["activations"]), 2)
+                                                  if stats["activations"] > base["activations"] else None),
+                    "terminations": {key: stats["terminations"].get(key, 0) - base["terminations"].get(key, 0)
+                                     for key in set(stats["terminations"]) | set(base["terminations"])},
+                    "reassignments": stats["reassignments"] - base["reassignments"],
+                    "role_reassignments": stats["role_reassignments"] - base["role_reassignments"],
+                    "retreat_unit_steps": stats["retreat_unit_steps"] - base["retreat_unit_steps"],
+                    "safe_streak_exits": stats["safe_streak_exits"] - base["safe_streak_exits"],
+                    "heal_assignments_created": stats["heal_assignments_created"] - base["heal_assignments_created"],
+                    "heal_target_switches": stats["heal_target_switches"] - base["heal_target_switches"],
+                    "heal_self_preserves": stats["heal_self_preserves"] - base["heal_self_preserves"],
+                    "heal_no_target_steps": stats["heal_no_target_steps"] - base["heal_no_target_steps"],
+                    "predicted_damage": round(stats["predicted_damage"] - base["predicted_damage"], 2),
+                    "estimated_overkill": round(stats["estimated_overkill"] - base["estimated_overkill"], 2),
+                    "fallback_steps": stats["fallback_steps"] - base["fallback_steps"],
+                }
                 if ready:
                     record["final"] = battle_state(env)
                     record["final_game_loop"] = env._obs.observation.game_loop
@@ -318,6 +494,15 @@ async def run(args, api_key):
                 "sc2_action_errors": action_errors, "fixed_step_checks": fixed_step_checks,
                 "planner_fixed_step_checks": planner_fixed_step_checks,
                 "planner_result": planner.stats if planner is not None else None,
+                "skill": {**skill_manager.stats,
+                          "mean_steps_per_activation": (round(skill_manager.stats["steps"]
+                                                               / skill_manager.stats["activations"], 2)
+                                                        if skill_manager.stats["activations"] else None),
+                          "skill_name": args.skill_name if args.skill_mode == "always" else
+                              ("jev_selected" if args.skill_mode == "jev" else None),
+                          "cover_risk_threshold": args.cover_risk_threshold,
+                          "cover_safe_streak": args.cover_safe_streak,
+                          "heal_switch_margin": args.heal_switch_margin},
                 "latency_median_ms": statistics.median(latencies) if latencies else None,
                 "latency_max_ms": max(latencies) if latencies else None,
                 "wall_seconds": round(time.monotonic() - started, 3), "failure": failure,
@@ -336,7 +521,21 @@ def positive(value):
     return number
 
 
-def main():
+def positive_int(value):
+    number = int(value)
+    if number < 1:
+        raise argparse.ArgumentTypeError("must be a positive integer")
+    return number
+
+
+def risk_threshold_value(value):
+    number = float(value)
+    if not 0 < number < 1:
+        raise argparse.ArgumentTypeError("must be between 0 and 1")
+    return number
+
+
+def build_parser():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--map", choices=SUPPORTED_MAPS, default="3m")
     parser.add_argument("--policy", choices=["jev", "nearest"], default="jev")
@@ -353,12 +552,34 @@ def main():
     parser.add_argument("--sc2-path", type=Path, default=Path(os.environ.get("SC2PATH", r"C:\game\StarCraft II")))
     parser.add_argument("--config-file", type=Path, default=REPO.parent / "config.md")
     parser.add_argument("--output-dir", type=Path)
+    parser.add_argument("--skill-mode", choices=["off", "always", "jev"], default="off",
+                        help="off: original per-unit flow; always: local FocusFireBudget without JEV; jev: JEV picks per window")
+    parser.add_argument("--skill-max-steps", type=int, default=4,
+                        help="Maximum local decision steps per skill activation")
+    parser.add_argument("--skill-name", choices=["focus_fire_budget", "cover_retreat", "heal_assign"],
+                        default="focus_fire_budget",
+                        help="Skill used by --skill-mode always (jev mode picks from all skills)")
+    parser.add_argument("--heal-switch-margin", type=float, default=0.15,
+                        help="HealAssign: score bonus for keeping the previous heal target")
+    parser.add_argument("--cover-risk-threshold", type=risk_threshold_value, default=0.35,
+                        help="CoverRetreat: effective survival ratio below which a threatened unit retreats")
+    parser.add_argument("--cover-safe-streak", type=positive_int, default=2,
+                        help="CoverRetreat: consecutive threat-free steps required to end the skill")
     add_planner_arguments(parser)
+    return parser
+
+
+def main():
+    parser = build_parser()
     args = parser.parse_args()
     if min(args.episodes, args.step_mul, args.max_requests, args.batch_concurrency) < 1 or args.api_retries < 0 or (args.episode_limit is not None and args.episode_limit < 1):
         parser.error("episodes, step-mul, max-requests and episode-limit must be positive")
     if args.planner != "none" and args.policy != "jev":
         parser.error("The Astra planner requires --policy jev")
+    if args.skill_mode == "jev" and args.policy != "jev":
+        parser.error("--skill-mode jev requires --policy jev (JEV performs the selection)")
+    if args.skill_max_steps < 1:
+        parser.error("--skill-max-steps must be positive")
     try:
         api_key = load_api_key(args.config_file) if args.policy == "jev" else None
         asyncio.run(run(args, api_key))

@@ -37,6 +37,52 @@ py -3.10 jev_star.py micro-suite --all-maps --policies jev --episodes 3 --seed 1
 
 To resume the same configuration, add `--resume` and use the same output directory. Maps with all three episodes completed are reused; failed attempts are preserved, and retries receive new directories. The summary's `summary_file` identifies the selected valid result. Create a new experiment directory when changing the interface, plan, or parameters.
 
+### FocusFireBudget skill
+
+`--skill-mode` selects how the parameterized focus-fire skill participates (default `off`, which keeps the original per-unit JEV / Nearest flow byte-for-byte):
+
+| Mode | Behavior |
+| --- | --- |
+| `off` | Original per-unit flow; no skill code runs. |
+| `always` | The local FocusFireBudget allocator acts every step without any JEV or Astra calls — free validation of the algorithm. |
+| `jev` | Each decision window, JEV answers one `team_skill` Choice — `0` = direct_control, `1` = focus_fire_budget with automatic target priority, `2`… = focus_fire_budget with an explicit priority target (`2`=e0, `3`=e1, …; dynamically bound to currently visible enemies, capped at four explicit candidates). The mode is held for `--skill-max-steps` steps (default 4). `jev` mode requires `--policy jev`. |
+
+The allocator ranks visible targets deterministically, assigns just enough attackers to cover each target's remaining health plus shields (minus still-pending predicted damage), and moves the remaining attackers to the next target. Damage is predicted from public combat profiles only; unknown weapon data, cooldowns and out-of-range attackers are assigned but never counted toward the budget, so the budget under-counts instead of inventing numbers. Dead units get action `0`; every emitted action is validated against `get_avail_agent_actions()`. Medivacs are never assigned attacks; they keep deterministic heal/move fallbacks. Skill telemetry (`skill_selected` / `skill_started` / `skill_step` / `skill_reassigned` / `skill_terminated` events, per-episode and summary `skill` stats: activations, steps, mean duration, termination reasons, reassignments, predicted damage and estimated overkill) is written to `events.jsonl`, `run.json` and `summary.json`. `micro-suite` forwards `--skill-mode` / `--skill-max-steps` and rejects `--resume` attempts that change them.
+
+```powershell
+# A: original per-unit JEV (baseline)
+py -3.10 jev_star.py micro --map 3m --policy jev --planner none --skill-mode off --episodes 3
+# B: always use the local skill, no model calls
+py -3.10 jev_star.py micro --map 3m --policy nearest --planner none --skill-mode always --episodes 3
+# C: JEV chooses between per-unit control and the skill
+py -3.10 jev_star.py micro --map 3m --policy jev --planner none --skill-mode jev --skill-max-steps 4 --episodes 3
+```
+
+Limitations (first version): damage prediction assumes one imminent attack per ready, in-range attacker and does not simulate projectiles, splash or heal-over-time; the skill terminates and returns control rather than guessing when target data becomes unavailable.
+
+### HealAssign skill
+
+`--skill-name heal_assign` (with `--skill-mode always`) or JEV choice `3` (with `--skill-mode jev`, offered only when the snapshot actually contains Medivacs) activates HealAssign. Wounded-target demand is health-only (`max_health - health`; shield loss never makes a target healable). Each healer/target edge is scored with an explainable urgency (missing health, low ratio, recent observed loss, visible threats) minus distance cost plus a `--heal-switch-margin` (0.15) bonus for keeping the previous target, then a deterministic maximum-weight **one-to-one** matching assigns healers — several Medivacs never dogpile one target, and the classic "flexible healer must yield the shared target to the restricted healer" case is solved exactly (≤8 healers exact search; greedy+swap beyond). Already-active heal orders are detected and re-issued so the executor's `existing_heal_order_retained` path avoids duplicate commands. An endangered healer self-preserves via CoverRetreat's retreat scoring and releases its reservation; HealAssign controls **healer slots only** — non-healers keep the declared base policy (deterministic nearest in free `always` mode, per-unit JEV in `jev` mode, merged with a logged `skill_merge` event so every unit has exactly one action source). Events: `heal_skill_selected/started/step`, `heal_assignment_created/changed`, `heal_action_issued`, `heal_assignment_released`, `heal_skill_terminated`; summary stats add assignments created, target switches, self-preserves and no-target steps. Planned healing is never counted as restored health.
+
+```powershell
+# Free local HealAssign validation on an MMM-style map with Medivacs, zero model calls
+py -3.10 jev_star.py micro --map MMM --policy nearest --planner none --skill-mode always --skill-name heal_assign --episodes 1 --output-dir jev_runs\heal-assign-local
+# JEV chooses between direct control, focus fire, cover retreat and heal assign
+py -3.10 jev_star.py micro --map MMM --policy jev --planner none --skill-mode jev --skill-max-steps 4 --episodes 3 --output-dir jev_runs\heal-assign-jev
+```
+
+### CoverRetreat skill
+
+`--skill-name cover_retreat` (with `--skill-mode always`) or JEV choice `2` (with `--skill-mode jev`) activates CoverRetreat. Endangered allies — visible threat present AND effective survival ratio below `--cover-risk-threshold` (0.35) or a large recent loss — retreat along the best-scoring legal move (max distance from visible enemies, avoid other enemies' danger radius, prefer allied support, keep the previous direction); remaining allies with legal attacks cover them by delegating to FocusFireBudget restricted to cover-role units, so retreating units never contribute to the same step's damage budget. If everyone is endangered the whole team retreats; no unit is sacrificed as a forced cover. Exit uses hysteresis: the skill ends after `--cover-safe-streak` (2) consecutive threat-free steps rather than the moment health looks low, preventing retreat/attack oscillation. Thresholds live in one `PARAMS` dict in `skills/cover_retreat.py` and are CLI-configurable. Cover attacks are never assumed to redirect enemy targeting; Medivacs are never assigned attacks but do flee when threatened. Events: `cover_retreat_selected/started/step`, `cover_roles_updated`, `retreat_direction_selected`, `cover_retreat_terminated`; per-episode and summary `skill` stats add role reassignments, retreat unit steps and safe-streak exits.
+
+```powershell
+# Free local CoverRetreat validation, zero model calls
+py -3.10 jev_star.py micro --map 3m --policy nearest --planner none --skill-mode always --skill-name cover_retreat --episodes 3
+# JEV chooses between direct control, focus fire and cover retreat
+py -3.10 jev_star.py micro --map 3m --policy jev --planner none --skill-mode jev --skill-max-steps 4 --episodes 3
+```
+
+
 `SMAC_HARD_maps/` contains all 35 registered maps, including maps from the older upstream directories. The environment uses the modified `pysc2/` bundled here; do not replace it with a separate PySC2 package installed through pip.
 
 See [experiments](../docs/experiments.md) for results and the [main README](../README.md#english) for installation and API key configuration.
@@ -67,6 +113,11 @@ See [experiments](../docs/experiments.md) for results and the [main README](../R
 | [run.py](jev_micro/run.py) | 完整对局、日志、时钟核对与 replay |
 | [suite.py](jev_micro/suite.py) | 全图批测、失败保留与恢复 |
 | [catalog.py](jev_micro/catalog.py) | 35 张地图及两个开发场景标记 |
+| [skills/focus_fire.py](jev_micro/skills/focus_fire.py) | FocusFireBudget 集火伤害预算分配器 |
+| [skills/cover_retreat.py](jev_micro/skills/cover_retreat.py) | CoverRetreat 危险识别、撤退方向与掩护分配 |
+| [skills/heal_assign.py](jev_micro/skills/heal_assign.py) | HealAssign 多治疗者联合分配与持续治疗 |
+| [skill_policy.py](jev_micro/skill_policy.py) | JEV 小队级技能选择问题与解码 |
+| [skill_manager.py](jev_micro/skill_manager.py) | 技能生命周期、多步执行与终止 |
 
 从仓库根目录启动全图三局：
 
