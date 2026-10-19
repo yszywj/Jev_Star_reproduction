@@ -97,7 +97,6 @@ class SkillManager:
     def _step_focus_fire(self, payload, n_agents):
         state = payload["state"]
         result = allocate_focus_fire(state, n_agents, priority_target=self.priority_target,
-                                     pending_damage=self._pending_damage,
                                      previous_assignments=self.target_assignments or None)
         reassigned = bool(self.target_assignments) and result["assignments"] != self.target_assignments
         if reassigned:
@@ -111,8 +110,9 @@ class SkillManager:
         self.stats["steps"] += 1
         self.stats["estimated_overkill"] += sum(result["estimated_overkill"].values())
         self.stats["predicted_damage"] += sum(result["predicted_damage"].values())
-        # Predicted-but-not-yet-observed damage for the next step's budget.
-        self._pending_damage = dict(result["predicted_damage"])
+        # Cross-step pending-damage ledgers are disabled: observations cannot
+        # reliably separate landed from in-flight attacks, and subtracting a
+        # stale ledger double-counted damage already visible in health.
         telemetry = {"skill": "focus_fire_budget", "skill_step": self.elapsed_steps,
                      "skill_start_step": self.skill_start_step,
                      "participating_units": result["participating_units"],
@@ -137,9 +137,12 @@ class SkillManager:
 
     def _step_cover_retreat(self, payload, n_agents):
         state = payload["state"]
+        # Per-unit hysteresis: the previous step's retreating set decides who
+        # is judged at the tightened continue threshold; first-step and newly
+        # endangered units always use the full entry threshold.
         result = allocate_cover_retreat(state, n_agents, parameters=self.cover_params,
                                         previous_assignments=self.target_assignments or None,
-                                        continuing=True)
+                                        retreating_units=self.retreat_units)
         self.last_observation_step = state["game_loop"]
         self.skill_start_step = self.skill_start_step if self.skill_start_step is not None \
             else state["game_loop"]
@@ -217,7 +220,8 @@ class SkillManager:
         self.stats["heal_assignments_created"] += len(result["assignments"])
         self.stats["heal_target_switches"] += switches
         self.stats["heal_self_preserves"] += len(result["self_preserving"])
-        if not result["assignments"] and not result["self_preserving"]:
+        if not result["assignments"] and not result["self_preserving"] \
+                and not result.get("approach_targets"):
             self.stats["heal_no_target_steps"] += 1
         partial = {int(actor[1:]): action for actor, action in result["healer_actions"].items()
                    if action is not None}

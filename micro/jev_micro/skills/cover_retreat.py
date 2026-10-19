@@ -59,17 +59,19 @@ def _threats_to(state, actor):
         or relation.get("in_enemy_weapon_range") is True)
 
 
-def detect_retreat_candidates(state, parameters=None, continuing=False):
-    """Return {actor: {"risk", "reasons", "threats", "facts"}} for endangered allies.
+def detect_retreat_candidates(state, parameters=None, retreating=frozenset()):
+    """Return {actor: {...}} for endangered allies at their own threshold.
 
     A unit retreats only when a visible threat exists AND its effective
     survival ratio is below threshold OR it just lost a large share of
     health. Low health without threats, or threats without damage pressure,
-    does not trigger retreat. ``continuing`` tightens the ratio threshold so
-    borderline units drop out instead of oscillating (exit hysteresis).
+    does not trigger retreat. Hysteresis is per unit, based on its own
+    history: units already retreating (``retreating``) must fall below the
+    tightened ``continue_factor`` threshold to keep retreating, so borderline
+    units drop out — while a unit entering for the first time always uses the
+    full entry threshold.
     """
     params = {**PARAMS, **(parameters or {})}
-    threshold = params["risk_threshold"] * (params["continue_factor"] if continuing else 1.0)
     candidates = {}
     for actor, unit in state["allies"].items():
         if not _alive(unit):
@@ -77,6 +79,8 @@ def detect_retreat_candidates(state, parameters=None, continuing=False):
         threats = _threats_to(state, actor)
         if not threats:
             continue  # No visible threat: never retreat on low health alone.
+        threshold = params["risk_threshold"] * (params["continue_factor"]
+                                                if actor in retreating else 1.0)
         ratio = survival_ratio(unit)
         maximum = (unit["max_health"] or 0) + (unit["max_shield"] or 0)
         recent_loss = (unit.get("health_lost_since_previous_decision", 0)
@@ -189,15 +193,19 @@ def threat_priority(state, retreat_units, cover_units):
 
 
 def allocate_cover_retreat(state, n_agents, parameters=None, previous_assignments=None,
-                           continuing=False):
+                           retreating_units=None):
     """One CoverRetreat decision step on a fresh snapshot.
 
-    Returns the full n_agents action list plus role/telemetry details. Roles
-    are mutually exclusive: a retreating unit never receives an attack from
-    this allocation, and its damage is excluded from the cover budget.
+    ``retreating_units`` carries the previous step's retreating set for
+    per-unit hysteresis (the very first step passes None/empty, so every unit
+    is judged at the full entry threshold). Roles are mutually exclusive: a
+    retreating unit never receives an attack from this allocation, and its
+    damage is excluded from the cover budget.
     """
     params = {**PARAMS, **(parameters or {})}
-    retreat_candidates = detect_retreat_candidates(state, params, continuing=continuing)
+    entry_candidates = detect_retreat_candidates(state, params)  # Entry threshold.
+    retreat_candidates = detect_retreat_candidates(
+        state, params, retreating=frozenset(retreating_units or ()))
     cover_units, retreat_units, other_units = assign_cover_roles(state, retreat_candidates)
 
     retreat_actions, retreat_telemetry = {}, {}
@@ -222,17 +230,26 @@ def allocate_cover_retreat(state, n_agents, parameters=None, previous_assignment
         cover_assignments = cover_result["assignments"]
 
     actions = [0] * n_agents
+    stop_fallbacks = []
     for actor, unit in state["allies"].items():
         index = int(actor[1:])
         if index >= n_agents or not _alive(unit):
             continue  # Dead units keep SMAC no-op 0.
         if actor in retreat_units:
             action = retreat_actions.get(actor)
-            actions[index] = action if action is not None else fallback_action(state, actor) or 0
+            if action is None:
+                action = fallback_action(state, actor)
         elif actor in cover_assignments:
-            actions[index] = 6 + int(cover_assignments[actor][1:])
+            action = 6 + int(cover_assignments[actor][1:])
         else:
-            actions[index] = fallback_action(state, actor) or 0
+            action = fallback_action(state, actor)
+        if action is None:
+            # Alive unit with no attack/heal/move candidate at all: Stop is
+            # the only explicit legal action left (it cancels the current
+            # order — never a free no-op). Recorded, never silent.
+            action = 1
+            stop_fallbacks.append(actor)
+        actions[index] = action
 
     reason = None
     if not retreat_units:
@@ -247,13 +264,18 @@ def allocate_cover_retreat(state, n_agents, parameters=None, previous_assignment
         "other_units": other_units,
         "risks": {a: {"risk": v["risk"], "reasons": v["reasons"], "facts": v["facts"]}
                   for a, v in retreat_candidates.items()},
+        "entry_danger_units": sorted(entry_candidates),
         "retreat_actions": retreat_telemetry,
         "threat_priority": priorities,
         "cover_assignments": cover_assignments,
         "cover_budget": (cover_result or {}).get("predicted_damage"),
         "cover_overkill": (cover_result or {}).get("estimated_overkill"),
         "cover_terminated": (cover_result or {}).get("termination_reason"),
-        "safe": not retreat_units,
+        "stop_fallbacks": stop_fallbacks,
+        # Safe means nobody would even ENTER retreat at the full entry
+        # threshold; a thinner "below-continue-threshold" reading is not
+        # treated as safety.
+        "safe": not entry_candidates,
         "terminated": reason is not None,
         "termination_reason": reason,
     }

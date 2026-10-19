@@ -170,13 +170,16 @@ class SkillManagerTests(unittest.TestCase):
         # Cumulative stats survive; per-episode diffs are computed against a baseline copy.
         self.assertEqual(manager.stats, stats)
 
-    def test_pending_damage_carries_between_steps(self):
+    def test_pending_damage_ledger_stays_disabled_across_steps(self):
+        # P0 regression: the manager no longer carries predicted damage into
+        # the next step's budget; observations are the single source of truth.
         manager = SkillManager(max_steps=4)
         manager.select(FOCUS_FIRE_BUDGET)
         _, first = manager.step(payload(), 3)
         self.assertGreater(first["predicted_damage"]["e0"], 0)
         _, second = manager.step(payload(), 3)
-        self.assertEqual(second["pending_damage_applied"], first["predicted_damage"])
+        self.assertEqual(second["pending_damage_applied"], {})
+        self.assertEqual(first["pending_damage_applied"], {})
 
     def test_explicit_priority_target_flows_into_execution(self):
         manager = SkillManager(max_steps=4)

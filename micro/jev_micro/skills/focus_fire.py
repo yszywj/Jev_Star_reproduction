@@ -17,13 +17,16 @@ Model assumptions and scope (first version, deliberately conservative):
   known damage). If any required datum is unknown (effect-based weapons,
   missing API weapon lists, unknown range), that attacker's damage is treated
   as unknown: it is assigned but never accumulated into the budget.
-- The budget is needs-based, not event-based: a target's remaining need is its
-  current observed effective health minus ``pending_damage`` supplied by the
-  caller (damage predicted on an earlier step whose effect is not yet visible
-  in the observation). Observed health already contains landed damage, so
-  recomputing from the observation each step never double-counts a landed
-  attack, and ``pending_damage`` prevents re-planning a volley that was
-  already committed but not yet resolved.
+- The budget is needs-based, recomputed from the current observation every
+  step: a target's need is its observed effective health. Earlier versions
+  subtracted a cross-step ``pending_damage`` ledger, but the observation
+  cannot reliably tell a landed attack from an in-flight one, so that ledger
+  could double-subtract damage already reflected in observed health. The
+  ledger is therefore disabled (option A): each step re-derives the budget
+  from fresh observations only. Consequence, documented: attacks ordered but
+  not yet resolved are not credited, so the budget can overestimate the
+  firepower still needed and briefly over-assign attackers (visible as
+  estimated overkill). That is deliberately preferred over double-counting.
 - SC2 ResponseAction success is never interpreted as damage dealt.
 """
 
@@ -49,7 +52,13 @@ def _compatible_weapon(profile, enemy):
 
 
 def expected_damage(state, actor, enemy_id):
-    """Damage one attack from actor is expected to deal, or None if unknown."""
+    """Damage one attack from actor is expected to deal, or None if unknown.
+
+    Armor is applied per hit (SC2 semantics): two hits of 5 damage against 2
+    armor deal (5-2)*2 = 6, not 10-2 = 8. Unknown weapon data OR unknown
+    target armor yields None — never a fabricated number, and never a
+    zero-armor assumption that would overestimate the budget.
+    """
     ally = state["allies"][actor]
     enemy = state["visible_enemies"][enemy_id]
     profile = state.get("unit_type_profiles", {}).get(str(ally["unit_type_id"]), {})
@@ -61,9 +70,13 @@ def expected_damage(state, actor, enemy_id):
     hits = weapon.get("hits_per_attack") or 1
     if base is None:  # Effect-based weapons omitted from the API.
         return None
-    armor = enemy_profile.get("armor") if enemy_profile.get("known") else None
-    damage = base * hits - (armor or 0)
-    return max(damage, 0.5)  # SC2 floors positive hits at 0.5.
+    if not enemy_profile.get("known", False):
+        return None  # Target armor unknown: refuse to guess zero armor.
+    armor = enemy_profile.get("armor")
+    if armor is None:
+        return None
+    per_hit = max(base - armor, 0.5)  # SC2 floors each hit at 0.5.
+    return round(per_hit * hits, 3)
 
 
 def _countable(state, actor, relation):
@@ -127,12 +140,16 @@ def allocate_focus_fire(state, n_agents, priority_target=None,
                         pending_damage=None, previous_assignments=None):
     """Assign attackers to visible targets under a per-target damage budget.
 
+    ``pending_damage`` is accepted for interface compatibility but ignored
+    (see module docstring: cross-step pending ledgers can double-count damage
+    already reflected in observed health). The budget is recomputed from the
+    current observation each step.
+
     Returns a plain dict with the variable-length assignment map, the
     environment-length action list, budget telemetry and a termination hint.
     Every emitted attack action is legal in the snapshot; units that cannot
     attack anything receive an explicit deterministic fallback action.
     """
-    pending_damage = dict(pending_damage or {})
     previous_assignments = previous_assignments or {}
     allies, relations = state["allies"], state.get("relations", {})
     targets = target_priority(state, priority_target, previous_assignments)
@@ -140,8 +157,7 @@ def allocate_focus_fire(state, n_agents, priority_target=None,
 
     damage = {(actor, enemy_id): expected_damage(state, actor, enemy_id)
               for actor in attackers for enemy_id in targets}
-    need = {enemy_id: max(0.0, effective_health(state["visible_enemies"][enemy_id])
-                          - pending_damage.get(enemy_id, 0.0)) for enemy_id in targets}
+    need = {enemy_id: max(0.0, effective_health(state["visible_enemies"][enemy_id])) for enemy_id in targets}
     predicted = {enemy_id: 0.0 for enemy_id in targets}
     assignments, unknown_damage = {}, {}
 
@@ -214,7 +230,7 @@ def allocate_focus_fire(state, n_agents, priority_target=None,
         "actions": actions,
         "target_priority": targets,
         "predicted_damage": {enemy_id: round(value, 2) for enemy_id, value in predicted.items()},
-        "pending_damage_applied": {k: round(v, 2) for k, v in pending_damage.items()},
+        "pending_damage_applied": {},  # Cross-step ledger disabled; see docstring.
         "estimated_overkill": overkill,
         "budget_deficit": budget_deficit,
         "unknown_damage_attackers": unknown_damage,

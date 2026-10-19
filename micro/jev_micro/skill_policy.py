@@ -58,7 +58,8 @@ def skill_choices(visible_enemies, healers_present=True, max_explicit_targets=MA
     return criteria, priorities, modes
 
 
-def skill_request(payload, model, skill_max_steps, max_explicit_targets=MAX_EXPLICIT_TARGETS):
+def skill_request(payload, model, skill_max_steps, max_explicit_targets=MAX_EXPLICIT_TARGETS,
+                  active_skill=None, last_termination=None):
     """Build a compact team-level Choice request from an existing snapshot.
 
     Uses only shared team-visible state already present in the payload
@@ -78,6 +79,22 @@ def skill_request(payload, model, skill_max_steps, max_explicit_targets=MAX_EXPL
         coverage[enemy_id] = {"effective_health": enemy["effective_health"],
                               "type": enemy["type"], "legal_attackers": legal,
                               "ready_legal_attackers": ready}
+    # Compact team risk/heal summary for skill choice, from the same snapshot
+    # only (entry-threshold danger detection reused from CoverRetreat).
+    from .skills.cover_retreat import detect_retreat_candidates
+    endangered = detect_retreat_candidates(state)
+    wounded = sorted((actor for actor, u in allies.items()
+                      if u["alive"] and u["health"] < u["max_health"]
+                      and (u["max_health"] - u["health"]) >= max(1.0, u["max_health"] * 0.1)),
+                     key=lambda a: int(a[1:]))
+    recently_damaged = {actor: round(u.get("health_lost_since_previous_decision", 0)
+                                     + u.get("shield_lost_since_previous_decision", 0), 2)
+                        for actor, u in allies.items() if u["alive"]
+                        and (u.get("health_lost_since_previous_decision", 0)
+                             + u.get("shield_lost_since_previous_decision", 0)) > 0}
+    heal_demand = len({entry["target"]
+                       for candidates in state.get("heal_candidates", {}).values()
+                       for entry in candidates.values()})
     skill_state = {
         "objective": state["objective"],
         "skill_schema_version": SKILL_SCHEMA_VERSION,
@@ -85,8 +102,22 @@ def skill_request(payload, model, skill_max_steps, max_explicit_targets=MAX_EXPL
         "steps_remaining": state["steps_remaining"],
         "mode_window_steps": skill_max_steps,
         "live_allies": sum(u["alive"] for u in allies.values()),
-        "healers_present": any(u["alive"] and str(u.get("type", "")).lower().startswith("medivac")
-                               for u in allies.values()),
+        "healers_present": (any(u["alive"] and str(u.get("type", "")).lower().startswith("medivac")
+                                for u in allies.values()) and heal_demand > 0),
+        "team_risk_summary": {
+            "endangered_units": sorted(endangered, key=lambda a: int(a[1:])),
+            "low_health_units": [actor for actor in wounded
+                                 if allies[actor]["health"] / (allies[actor]["max_health"] or 1) < 0.35],
+            "recently_damaged": recently_damaged,
+            "threatened_unit_count": sum(1 for actor, u in allies.items() if u["alive"] and any(
+                r["distance"] <= 8.0 or r.get("in_enemy_weapon_range") is True
+                for r in relations.get(actor, {}).values())),
+            "legal_healers": sum(1 for candidates in state.get("heal_candidates", {}).values()
+                                 if candidates),
+            "units_needing_heal": heal_demand,
+        },
+        "active_skill": active_skill,
+        "last_skill_termination": last_termination,
         "allies_core": {actor: {"type": u["type"], "effective_health": u["effective_health"],
                                 "weapon_ready": u["weapon_ready"]}
                         for actor, u in allies.items() if u["alive"]},

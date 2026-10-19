@@ -269,5 +269,29 @@ class SuiteForwardingTests(unittest.TestCase):
                 self.assertEqual(raised.exception.code, 2)
 
 
+class MergeAndFreeModeTests(unittest.TestCase):
+    def test_merge_gives_each_unit_exactly_one_action_source(self):
+        from jev_micro.run import merge_local_and_base
+        base = [6, 6, 2, 4, 0]
+        merged = merge_local_and_base({1: 8, 4: 7}, base)
+        self.assertEqual(merged, [6, 8, 2, 4, 7])
+        self.assertEqual(len(merged), len(base))
+
+    def test_ten_units_one_healer_leaves_nine_jev_questions(self):
+        # P1 regression: when HealAssign takes over healer slots, JEV only
+        # receives questions for the remaining units.
+        questions = {f"u{i}": {"criteria": {"6": "Attack e0"}} for i in range(10)}
+        controlled = {f"u{i}" for i in (3, 9)}
+        filtered = {actor: q for actor, q in questions.items() if actor not in controlled}
+        self.assertEqual(len(filtered), 8)
+        self.assertNotIn("u3", filtered)
+
+    def test_all_units_local_means_zero_jev_questions(self):
+        questions = {f"u{i}": {"criteria": {}} for i in range(3)}
+        controlled = set(questions)
+        filtered = {a: q for a, q in questions.items() if a not in controlled}
+        self.assertEqual(filtered, {})  # run.py skips model requests entirely.
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -37,7 +37,6 @@ PARAMS = {
     "threat_distance": COVER_PARAMS["threat_distance"],
     "healer_danger_ratio": 0.35,  # healer survival ratio below which it may self-preserve
     "distance_cost": 0.02,       # per world unit of healer-target distance
-    "exact_matching_healers": 8,  # exact search bound; greedy+swap beyond this
 }
 
 HEAL_ORDER_ABILITY = 386  # Medivac heal, as used by the existing executor.
@@ -93,57 +92,87 @@ def _edge_score(state, healer, target_id, entry, urgency, previous_assignments, 
 def _best_matching(healers, edges):
     """Deterministic maximum-weight one-to-one matching (healers -> targets).
 
-    ``edges[h]`` is a list of (score, target) sorted by (-score, target id).
-    Exact branch-and-bound for small healer counts; greedy plus one swap
-    round beyond the bound. Healers may stay unassigned.
+    Uses ``scipy.optimize.linear_sum_assignment`` (SciPy is already a project
+    dependency) on a reward matrix padded with one dummy "stay idle" column
+    per healer, so idle healers are free and no illegal edge can become an
+    assignment. Falls back to the exhaustive search for small inputs when
+    SciPy is unavailable. Ties resolve deterministically for identical input.
     """
-    if len(healers) <= PARAMS["exact_matching_healers"]:
-        best = {"score": 0.0, "assign": {}}
+    targets = sorted({target for rows in edges.values() for _, target in rows})
+    if not healers or not targets:
+        return {}
+    if len(healers) <= _EXACT_FALLBACK_HEALERS:
+        return _exact_matching(healers, edges)
+    try:
+        import numpy as np
+        from scipy.optimize import linear_sum_assignment
+    except ImportError:
+        return _exact_matching(healers, edges)  # Small enough or accept the cost.
+    forbidden = -1e9
+    reward = np.full((len(healers), len(targets) + len(healers)), forbidden)
+    for i in range(len(healers)):
+        reward[i, len(targets) + i] = 0.0  # Idle option: always available.
+    healer_index = {healer: i for i, healer in enumerate(healers)}
+    target_index = {target: j for j, target in enumerate(targets)}
+    for healer, rows in edges.items():
+        for score, target in rows:
+            reward[healer_index[healer], target_index[target]] = score
+    rows_ind, cols_ind = linear_sum_assignment(-reward)  # Minimize -reward.
+    assignments = {}
+    for i, j in zip(rows_ind, cols_ind):
+        if j < len(targets) and reward[i, j] > 0:
+            assignments[healers[i]] = targets[j]
+    return assignments
 
-        def recurse(index, used, total, assign):
-            if index == len(healers):
-                if total > best["score"] or (total == best["score"] and not best["assign"]):
-                    best["score"], best["assign"] = total, dict(assign)
-                return
-            healer = healers[index]
-            recurse(index + 1, used, total, assign)  # leaving this healer idle
-            for score, target in edges[healer]:
-                if target in used or score <= 0:
-                    continue
-                assign[healer] = target
-                recurse(index + 1, used | {target}, total + score, assign)
-                del assign[healer]
 
-        recurse(0, frozenset(), 0.0, {})
-        return best["assign"]
+_EXACT_FALLBACK_HEALERS = 8
 
-    assign, used = {}, set()
-    for healer in healers:  # greedy pass in deterministic edge order
+
+def _exact_matching(healers, edges):
+    """Exhaustive deterministic optimum for small healer counts."""
+    best = {"score": 0.0, "assign": {}}
+
+    def recurse(index, used, total, assign):
+        if index == len(healers):
+            if total > best["score"] or (total == best["score"] and not best["assign"]):
+                best["score"], best["assign"] = total, dict(assign)
+            return
+        healer = healers[index]
+        recurse(index + 1, used, total, assign)  # leaving this healer idle
         for score, target in edges[healer]:
-            if score > 0 and target not in used:
-                assign[healer], _ = target, used.add(target)
-                break
-    for healer in healers:  # one swap round: an idle healer steals a target
-        if healer in assign:
-            continue
-        for score, target in edges[healer]:
-            if score <= 0:
+            if target in used or score <= 0:
                 continue
-            holder = next((h for h, t in assign.items() if t == target), None)
-            if holder is None:
-                assign[healer] = target
-                break
-            if edges[healer] and score > dict(edges[holder]).get(target, 0) + 1e-9:
-                del assign[holder]
-                assign[healer] = target
-                break
-    return assign
+            assign[healer] = target
+            recurse(index + 1, used | {target}, total + score, assign)
+            del assign[healer]
+
+    recurse(0, frozenset(), 0.0, {})
+    return best["assign"]
+
+
+def healer_safe_move(state, healer, parameters=None):
+    """Best legal move away from visible enemies for an endangered healer.
+
+    Unlike ``select_retreat_action`` this always returns the safest available
+    move even when no candidate strictly "improves" the situation, so a
+    threatened healer never falls back into approaching a wounded ally (which
+    could move it closer to the enemy). Returns an int action ID or None when
+    no movement candidate exists at all.
+    """
+    moves = state.get("movement_candidates", {}).get(healer, {})
+    relations = state.get("relations", {}).get(healer, {})
+    rows = []
+    for action_id, entry in moves.items():
+        distances = list(entry["distances_to_visible_enemies"].values())
+        min_enemy = min(distances) if distances else PARAMS["threat_distance"] + 1
+        rows.append((-min_enemy, int(action_id)))  # Max distance, then lowest ID.
+    return min(rows)[1] if rows else None
 
 
 def healer_idle_action(state, healer, target_pool, urgency, parameters=None):
     """Legal idle behavior for a healer with no assignment: approach the most
     urgent wounded target along a legal move, else take a safe positioning
-    move. Returns an action ID or None (base policy keeps control).
+    move. Returns an integer action ID or None (base policy keeps control).
 
     Medivacs never get attack fallbacks: their SMAC attack slots are heal
     commands and attacking enemies is not a legal action for them.
@@ -153,12 +182,11 @@ def healer_idle_action(state, healer, target_pool, urgency, parameters=None):
     if target_pool:
         best_target = max(sorted(target_pool), key=lambda t: (urgency.get(t, 0), -int(t[1:])))
         goal = state["allies"][best_target]["position"]
-        rows = [(math.dist(entry["destination"], goal), int(action_id), action_id)
+        rows = [(math.dist(entry["destination"], goal), int(action_id))
                 for action_id, entry in moves.items()]
         if rows:
-            return min(rows)[2]  # Approach: never counted as provided healing.
-    action, _, _ = select_retreat_action(state, healer, {healer}, params)
-    return action
+            return min(rows)[1]  # Approach: never counted as provided healing.
+    return healer_safe_move(state, healer, params)
 
 
 def assign_healing(state, n_agents, previous_assignments=None, parameters=None):
@@ -199,6 +227,16 @@ def assign_healing(state, n_agents, previous_assignments=None, parameters=None):
                 "missing_health_factor": round(
                     entry["missing_health"] / (allies[target_id]["max_health"] or 1), 3)}
 
+    # Wounded, healable-looking allies outside heal range: observation facts
+    # only. They are never heal ASSIGNMENTS — idle healers may approach them
+    # along legal moves so the next step can have legal edges at all.
+    approach_pool = {}
+    for target_id, unit in allies.items():
+        if (target_id not in target_pool and unit["alive"] and not unit["is_flying"]
+                and not is_healer(unit) and unit["health"] < unit["max_health"]):
+            urgency.setdefault(target_id, score_heal_need(state, target_id, params))
+            approach_pool[target_id] = True
+
     edges = {}
     for healer in healers:
         if endangered[healer]:
@@ -219,19 +257,22 @@ def assign_healing(state, n_agents, previous_assignments=None, parameters=None):
     healer_actions, retained_orders, released = {}, {}, {}
     for healer in healers:
         if endangered[healer]:
-            # Self-preservation: retreat move via CoverRetreat's scorer; the
-            # heal reservation is released this step, never both actions.
-            action, reason, _ = select_retreat_action(state, healer, {healer}, params)
-            healer_actions[healer] = action if action is not None \
-                else healer_idle_action(state, healer, target_pool, urgency, params)
+            # Self-preservation first: safest available move away from visible
+            # enemies. Approaching wounded allies is NOT a fallback here — a
+            # failed retreat must not drift the healer toward the threat.
+            action = healer_safe_move(state, healer, params)
+            healer_actions[healer] = action  # None -> base policy keeps the slot.
             if (previous_assignments or {}).get(healer):
                 released[healer] = previous_assignments[healer]
             continue
         target_id = assignments.get(healer)
         if target_id is None:
-            # Legal idle behavior: approach a wounded ally or reposition;
-            # None leaves the slot to the declared base policy.
-            healer_actions[healer] = healer_idle_action(state, healer, target_pool,
+            # Legal idle behavior: approach a legally healable target first;
+            # otherwise head toward the most urgent out-of-range wounded ally
+            # (approach only — never counted as provided healing). None
+            # leaves the slot to the declared base policy.
+            pool = target_pool or approach_pool
+            healer_actions[healer] = healer_idle_action(state, healer, pool,
                                                         urgency, params)
             continue
         info = target_pool[target_id][healer]
@@ -247,7 +288,7 @@ def assign_healing(state, n_agents, previous_assignments=None, parameters=None):
     live_healers = [h for h in healers]
     if not live_healers:
         reason = "all_healers_dead"
-    elif not target_pool:
+    elif not target_pool and not approach_pool:
         reason = "no_heal_demand"
     elif not assignments and all(endangered.values()):
         reason = "all_healers_endangered"
@@ -257,6 +298,7 @@ def assign_healing(state, n_agents, previous_assignments=None, parameters=None):
         "healers": healers,
         "dead_healers": dead_healers,
         "wounded_targets": sorted(target_pool),
+        "approach_targets": sorted(approach_pool),
         "assignments": assignments,
         "healer_actions": healer_actions,
         "urgency": urgency,

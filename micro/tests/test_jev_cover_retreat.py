@@ -105,12 +105,25 @@ class DetectionTests(unittest.TestCase):
         candidates = detect_retreat_candidates(build_state(allies, enemies))
         self.assertIn("u0", candidates)
 
-    def test_continuing_hysteresis_tightens_threshold(self):
-        allies = {**make_ally(0, (10, 16), health=14), **make_ally(1, (9, 16))}  # ratio 0.31
+    def test_continuing_hysteresis_tightens_threshold_per_unit(self):
+        allies = {**make_ally(0, (10, 16), health=14), **make_ally(1, (11, 16), health=8),
+                  **make_ally(2, (9, 16))}
         enemies = {**make_enemy(0, (13, 16))}
         state = build_state(allies, enemies)
-        self.assertIn("u0", detect_retreat_candidates(state))  # 0.31 < 0.35 enters.
-        self.assertNotIn("u0", detect_retreat_candidates(state, continuing=True))  # needs < 0.28.
+        # First decision (no history): u0 (ratio 0.31) enters at the 0.35 threshold.
+        self.assertIn("u0", detect_retreat_candidates(state))
+        # u0 already retreating must fall below 0.28 to continue; u1 (0.18) enters.
+        continuing = detect_retreat_candidates(state, retreating={"u0"})
+        self.assertNotIn("u0", continuing)
+        self.assertIn("u1", continuing)
+
+    def test_entry_threshold_used_on_first_step_of_skill(self):
+        # P0 regression: the manager previously passed a squad-wide tightened
+        # threshold on the very first step, missing a 0.30-ratio unit.
+        allies = {**make_ally(0, (10, 16), health=13.5), **make_ally(1, (9, 16))}
+        state = build_state(allies, {**make_enemy(0, (13, 16))})
+        result = allocate_cover_retreat(state, 2)  # No retreating_units history.
+        self.assertEqual(result["retreat_units"], ["u0"])
 
     def test_invisible_enemies_are_never_facts(self):
         allies = {**make_ally(0, (10, 16), health=5)}

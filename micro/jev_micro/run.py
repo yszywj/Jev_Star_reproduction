@@ -112,6 +112,11 @@ async def run(args, api_key):
     print(f"SMAC-Hard {args.map} | policy={args.policy} | opponent={args.opponent} | fixed-step={args.step_mul}", flush=True)
     print(f"Output: {output}", flush=True)
     print(f"Client branch: {settings['client_branch']} | local SC2 API (no Battle.net matchmaking)", flush=True)
+    if args.skill_mode == "always":
+        # Explicit contract: always mode is free. Non-skill slots use the
+        # deterministic nearest baseline even when --policy jev is given.
+        settings["always_mode_base_policy"] = "nearest"
+        print("skill-mode always: local skills + deterministic nearest base; no model requests", flush=True)
 
     log_file = (output / "events.jsonl").open("w", encoding="utf-8", buffering=1)
     def emit(event, **fields):
@@ -230,6 +235,7 @@ async def run(args, api_key):
             episode_dir.mkdir()
             episode_start = time.monotonic()
             skill_baseline = copy.deepcopy(skill_manager.stats)
+            heal_unavailable = False
             skill_manager.reset()
             record = {"episode": episode, "policy": args.policy, "status": "starting",
                       "steps": 0, "requests": 0, "reward": 0.0, "input_tokens": 0, "output_tokens": 0}
@@ -285,7 +291,7 @@ async def run(args, api_key):
                         # Free local validation of the allocator; no model calls.
                         always_skill = {"cover_retreat": COVER_RETREAT,
                                         "heal_assign": HEAL_ASSIGN}.get(args.skill_name, FOCUS_FIRE_BUDGET)
-                        if not skill_manager.active:
+                        if not skill_manager.active and not heal_unavailable:
                             skill_manager.select(always_skill)
                             emit("skill_started", episode=episode, step=record["steps"],
                                  skill=always_skill,
@@ -295,17 +301,23 @@ async def run(args, api_key):
                             if always_skill == HEAL_ASSIGN:
                                 emit_heal_events({"skill": "heal_assign"}, episode,
                                                  record["steps"], started=True)
-                        if always_skill == HEAL_ASSIGN:
+                        if always_skill == HEAL_ASSIGN and not heal_unavailable:
                             # HealAssign controls healer slots only; the declared
                             # deterministic nearest baseline fills every other unit.
                             heal_partial, skill_telemetry = skill_manager.step(payload, env.n_agents)
                             emit("skill_step", episode=episode, step=record["steps"], **skill_telemetry)
                             emit_heal_events(skill_telemetry, episode, record["steps"])
+                            if skill_telemetry.get("termination_reason") == "no_healers":
+                                # Scenario has no healers at all: report once and
+                                # stop re-activating an unusable skill.
+                                heal_unavailable = True
+                                emit("skill_unavailable", episode=episode, step=record["steps"],
+                                     skill="heal_assign", reason="no_healers")
                             if "termination_reason" in skill_telemetry:
                                 emit("skill_terminated", episode=episode, step=record["steps"],
                                      reason=skill_telemetry["termination_reason"],
                                      elapsed_steps=skill_telemetry["skill_step"])
-                        else:
+                        elif always_skill != HEAL_ASSIGN:
                             actions, skill_telemetry = skill_manager.step(payload, env.n_agents)
                             emit("skill_step", episode=episode, step=record["steps"], **skill_telemetry)
                             emit_cover_events(skill_telemetry, episode, record["steps"])
@@ -315,7 +327,9 @@ async def run(args, api_key):
                                      elapsed_steps=skill_telemetry["skill_step"])
                     elif args.skill_mode == "jev":
                         if skill_manager.mode_remaining == 0:
-                            skill_payload = skill_request(payload, args.model, args.skill_max_steps)
+                            skill_payload = skill_request(payload, args.model, args.skill_max_steps,
+                                                          active_skill=skill_manager.current_skill,
+                                                          last_termination=skill_manager.termination_reason)
                             response = await fetch_batch(skill_payload, episode, record["steps"],
                                                         "team_skill", record)
                             skill_choice, skill_priority = decode_skill(skill_payload, response["answers"])
@@ -336,8 +350,8 @@ async def run(args, api_key):
                             fixed_step_checks += 1
                         skill_manager.spend_mode_step()
                         if skill_manager.current_skill == HEAL_ASSIGN and skill_manager.active:
-                            # Healers run HealAssign; every other unit keeps the
-                            # original per-unit JEV decision (billed and logged).
+                            # Healers run HealAssign locally; JEV is asked ONLY
+                            # for the units the skill did not take over.
                             heal_partial, skill_telemetry = skill_manager.step(payload, env.n_agents)
                             emit("skill_step", episode=episode, step=record["steps"], **skill_telemetry)
                             emit_heal_events(skill_telemetry, episode, record["steps"])
@@ -345,6 +359,14 @@ async def run(args, api_key):
                                 emit("skill_terminated", episode=episode, step=record["steps"],
                                      reason=skill_telemetry["termination_reason"],
                                      elapsed_steps=skill_telemetry["skill_step"])
+                            controlled = {f"u{i}" for i in (heal_partial or {})}
+                            if controlled:
+                                payload = {**payload, "questions": {
+                                    actor: question for actor, question in payload["questions"].items()
+                                    if actor not in controlled}}
+                                emit("skill_handoff", episode=episode, step=record["steps"],
+                                     skill="heal_assign", locally_controlled=sorted(controlled),
+                                     jev_units=sorted(payload["questions"]))
                         elif skill_manager.active:
                             previous_assignments = dict(skill_manager.target_assignments)
                             actions, skill_telemetry = skill_manager.step(payload, env.n_agents)
@@ -359,7 +381,16 @@ async def run(args, api_key):
                                      reason=skill_telemetry["termination_reason"],
                                      elapsed_steps=skill_telemetry["skill_step"])
                     if actions is None:
-                        if client is not None:
+                        if not payload["questions"]:
+                            # Every living unit is locally skill-controlled; no
+                            # model requests at all this step.
+                            actions = [0] * env.n_agents
+                            emit("decision", episode=episode, step=record["steps"],
+                                 actions=actions, batch_count=0, policy="skill_local_only")
+                        elif client is not None and args.skill_mode != "always":
+                            # always mode stays free even with --policy jev: the
+                            # declared deterministic nearest base fills uncontrolled
+                            # slots, so no paid call is ever made in that mode.
                             batches = batch_requests(payload)
                             request_start = time.monotonic()
                             responses = await asyncio.gather(*(fetch_batch(batch, episode, record["steps"], i, record)
@@ -386,7 +417,7 @@ async def run(args, api_key):
                     if heal_partial is not None:
                         # One final action per unit: healer slots come from
                         # HealAssign, everything else from the declared base.
-                        actions = [heal_partial.get(i, action) for i, action in enumerate(actions)]
+                        actions = merge_local_and_base(heal_partial, actions)
                         emit("skill_merge", episode=episode, step=record["steps"],
                              skill="heal_assign", overridden_slots=sorted(heal_partial),
                              base_policy=("jev" if client is not None else "nearest"))
@@ -512,6 +543,11 @@ async def run(args, api_key):
             log_file.close()
             print(f"Summary: {output / 'summary.json'}", flush=True)
     return output
+
+
+def merge_local_and_base(partial, base):
+    """One final action per unit: local skill slots override the base policy."""
+    return [partial.get(index, action) for index, action in enumerate(base)]
 
 
 def positive(value):

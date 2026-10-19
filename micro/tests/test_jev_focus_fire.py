@@ -94,11 +94,27 @@ class BudgetAllocationTests(unittest.TestCase):
         self.assertEqual(result_no_priority["target_priority"][0], "e1")
         self.assertEqual(set(result_no_priority["assignments"].values()), {"e0", "e1", "e2"})
 
-    def test_pending_damage_prevents_replanning_committed_volley(self):
+    def test_observed_damage_is_never_subtracted_twice(self):
+        # P0 regression: target had 12 HP, last step predicted 6 damage, this
+        # step observes 4 HP remaining. The disabled cross-step ledger means
+        # the budget derives from the OBSERVED 12 (no stale deduction), and a
+        # fresh observation of 4 is budgeted as 4 — never 4 minus the old 6.
         state = make_state(2, {**enemy(0, 12), **enemy(1, 30)})
         result = allocate_focus_fire(state, 2, pending_damage={"e0": 6})
-        self.assertEqual(result["assignments"]["u0"], "e0")
-        self.assertEqual(result["assignments"]["u1"], "e1")
+        self.assertEqual(result["pending_damage_applied"], {})
+        fresh_state = make_state(2, {**enemy(0, 4), **enemy(1, 30)})
+        fresh = allocate_focus_fire(fresh_state, 2, pending_damage={"e0": 6})
+        self.assertEqual(fresh["assignments"], {"u0": "e0", "u1": "e1"})  # u0 covers observed 4.
+        self.assertEqual(fresh["budget_deficit"]["e0"], 0)
+
+    def test_accepted_but_unresolved_attack_not_recounted(self):
+        # A command SC2 acknowledged but whose damage is not yet visible must
+        # not let the next step under-assign: the budget always uses observed
+        # health, so a still-healthy target keeps its full need.
+        state = make_state(2, {**enemy(0, 10), **enemy(1, 10)})
+        first = allocate_focus_fire(state, 2)
+        second = allocate_focus_fire(state, 2, pending_damage=first["predicted_damage"])
+        self.assertEqual(first["assignments"], second["assignments"])
 
     def test_previous_assignment_breaks_attacker_ties(self):
         state = make_state(2, {**enemy(0, 6), **enemy(1, 6)})
@@ -269,6 +285,32 @@ class LegalityAndRealityTests(unittest.TestCase):
         state = make_state(2, enemies)
         self.assertEqual(target_priority(state), target_priority(state))
         self.assertEqual(target_priority(state), ["e0", "e1"])
+
+
+class DamageFormulaTests(unittest.TestCase):
+    def test_armor_is_applied_per_hit(self):
+        # Two hits of 5 damage against 2 armor: (5-2)*2 = 6, not 10-2 = 8.
+        profiles = {"48": {"known": True, "armor": 0, "weapons": [
+            {"target_type": "ground", "range": 5, "base_damage": 5, "hits_per_attack": 2}]},
+            "73": {"known": True, "armor": 2, "weapons": []}}
+        state = make_state(1, enemy(0, 45, type_id=73), profiles=profiles)
+        result = allocate_focus_fire(state, 1)
+        self.assertEqual(result["predicted_damage"]["e0"], 6)
+
+    def test_unknown_target_armor_is_unknown_not_zero(self):
+        profiles = {"48": {"known": True, "armor": 0, "weapons": [
+            {"target_type": "ground", "range": 5, "base_damage": 6, "hits_per_attack": 1}]}}
+        state = make_state(1, enemy(0, 10, type_id=999), profiles=profiles)
+        state["unit_type_profiles"]["999"] = {"known": True}  # Armor field missing.
+        result = allocate_focus_fire(state, 1)
+        self.assertEqual(result["predicted_damage"], {"e0": 0})
+        self.assertEqual(result["unknown_damage_attackers"], {"u0": "e0"})
+
+    def test_shield_counts_toward_need(self):
+        state = make_state(2, {**enemy(0, 4, shield=8), **enemy(1, 30)})
+        result = allocate_focus_fire(state, 2)
+        self.assertEqual([a for a, t in result["assignments"].items() if t == "e0"],
+                         ["u0", "u1"])  # 12 effective HP needs both attackers.
 
 
 if __name__ == "__main__":

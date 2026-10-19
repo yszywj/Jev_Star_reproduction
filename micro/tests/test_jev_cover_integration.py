@@ -10,6 +10,7 @@ from unittest.mock import patch
 
 from jev_micro.client import JevError
 from jev_micro.skill_manager import SkillManager
+from jev_micro.skills.cover_retreat import allocate_cover_retreat
 from jev_micro.skill_policy import (COVER_RETREAT, DIRECT_CONTROL,
                                     decode_skill, skill_request, validate_skill_response)
 from test_jev_cover_retreat import build_state, make_ally, make_enemy
@@ -250,6 +251,48 @@ class SuiteForwardingTests(unittest.TestCase):
                 with self.assertRaises(SystemExit) as raised:
                     suite.main()
                 self.assertEqual(raised.exception.code, 2)
+
+
+class FirstStepThresholdTests(unittest.TestCase):
+    def test_manager_first_step_uses_entry_threshold(self):
+        # P0 regression: first execution step must not use the tightened
+        # continue threshold. u0 ratio 0.30 with a nearby threat retreats.
+        allies = {**make_ally(0, (10, 16), health=13.5), **make_ally(1, (9, 16))}
+        enemies = {**make_enemy(0, (13, 16))}
+        state = build_state(allies, enemies)
+        state["objective"] = "win"
+        state["map"], state["episode"], state["game_loop"] = "3m", 1, 80
+        state["steps_remaining"] = 50
+        manager = SkillManager(4)
+        manager.select(COVER_RETREAT)
+        actions, telemetry = manager.step({"model": "m", "state": state}, 2)
+        self.assertEqual(telemetry["retreat_units"], ["u0"])
+        self.assertIn(actions[0], (2, 3, 4, 5))
+
+    def test_units_keep_individual_retreat_history(self):
+        # u0 (0.31) retreating, u1 (0.18) newly endangered: step two judges
+        # each unit by its own history — u0 may drop out, u1 stays.
+        allies = {**make_ally(0, (10, 16), health=14), **make_ally(1, (11, 16), health=8)}
+        enemies = {**make_enemy(0, (13, 16))}
+        state = build_state(allies, enemies)
+        state["objective"] = "win"
+        state["map"], state["episode"], state["game_loop"] = "3m", 1, 80
+        state["steps_remaining"] = 50
+        manager = SkillManager(4)
+        manager.select(COVER_RETREAT)
+        _, first = manager.step({"model": "m", "state": state}, 2)
+        self.assertEqual(first["retreat_units"], ["u0", "u1"])
+        _, second = manager.step({"model": "m", "state": state}, 2)
+        self.assertEqual(second["retreat_units"], ["u1"])  # u0 below continue bar.
+
+    def test_alive_unit_without_any_candidate_gets_stop_not_zero(self):
+        allies = {**make_ally(0, (10, 16), health=13.5), **make_ally(1, (9, 16))}
+        state = build_state(allies, {**make_enemy(0, (13, 16))})
+        state["relations"]["u0"]["e0"]["smac_attack_available"] = False
+        state["movement_candidates"]["u0"] = {}  # No move, no attack, no heal.
+        result = allocate_cover_retreat(state, 2)
+        self.assertEqual(result["actions"][0], 1)  # Explicit Stop, never 0.
+        self.assertEqual(result["stop_fallbacks"], ["u0"])
 
 
 if __name__ == "__main__":
