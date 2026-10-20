@@ -26,6 +26,7 @@ Model assumptions and scope (first version):
 - Planned damage from FocusFireBudget is prediction, never actual damage.
 """
 
+from .combat_timing import can_fire_within_window
 from .cover_retreat import PARAMS as COVER_PARAMS, detect_retreat_candidates, select_retreat_action
 from .focus_fire import allocate_focus_fire, expected_damage, fallback_action
 
@@ -57,14 +58,23 @@ def _legal_attack_targets(state, actor):
             if relation["smac_attack_available"]]
 
 
-def _has_kill_opportunity(state, actor):
-    """True when this unit can very likely kill a visible target this step."""
+def _has_kill_opportunity(state, actor, parameters=None):
+    """True when this unit can very likely kill a visible target this step.
+
+    Uses the same window fire-timing as FocusFireBudget (shared helper), so
+    the two skills can never disagree about whether a cooling-down unit can
+    still shoot this control window.
+    """
     unit = state["allies"][actor]
-    if not unit["weapon_ready"]:
+    fires = (lambda target: can_fire_within_window(state, actor, target,
+                                                    parameters=parameters))         if (parameters or {}).get("window_fire") else (lambda target: unit["weapon_ready"])
+    if (not unit["weapon_ready"] and not (parameters or {}).get("window_fire")):
         return False
     for enemy_id in _legal_attack_targets(state, actor):
         relation = state["relations"][actor][enemy_id]
         if relation["in_weapon_range"] is not True:
+            continue
+        if not fires(enemy_id):
             continue
         damage = expected_damage(state, actor, enemy_id)
         enemy = state["visible_enemies"][enemy_id]
@@ -97,11 +107,15 @@ def evaluate_retreat_value(state, actor, retreat_move, unit_state, posture="bala
         if _has_kill_opportunity(state, actor):
             return False, "kill_opportunity"
         return False, "retreat_cap_reached"
-    if _has_kill_opportunity(state, actor):
+    if _has_kill_opportunity(state, actor, parameters):
         return False, "kill_opportunity"
-    can_attack_now = (unit["weapon_ready"]
-                      and any(state["relations"][actor][e]["in_weapon_range"] is not False
-                              for e in _legal_attack_targets(state, actor)))
+    if (parameters or {}).get("window_fire"):
+        can_attack_now = any(can_fire_within_window(state, actor, e, parameters=parameters)
+                             for e in _legal_attack_targets(state, actor))
+    else:
+        can_attack_now = (unit["weapon_ready"]
+                          and any(state["relations"][actor][e]["in_weapon_range"] is not False
+                                  for e in _legal_attack_targets(state, actor)))
     maximum = (unit["max_health"] or 0) + (unit["max_shield"] or 0) or 1
     ratio = (unit["health"] + unit["shield"]) / maximum
     recent_loss = (unit.get("health_lost_since_previous_decision", 0)
@@ -198,8 +212,16 @@ def allocate_adaptive_focus_fire(state, n_agents, unit_states=None, all_in=False
         )
         endangered = detect_retreat_candidates(state, cover_parameters)
         for actor in sorted(endangered, key=lambda a: int(a[1:])):
+            unit = state["allies"][actor]
+            maximum = (unit["max_health"] or 0) + (unit["max_shield"] or 0) or 1
+            recent_loss = (unit.get("health_lost_since_previous_decision", 0)
+                           + unit.get("shield_lost_since_previous_decision", 0)) / maximum
+            movement_mode = ("emergency"
+                             if (unit["health"] + unit["shield"]) / maximum < params.get("emergency_ratio", 0.15)
+                             or recent_loss >= params.get("emergency_recent_loss", 0.5)
+                             else "tactical")
             move, move_reason, _ = select_retreat_action(
-                state, actor, {actor}, cover_parameters)
+                state, actor, {actor}, cover_parameters, movement_mode=movement_mode)
             value, reason = evaluate_retreat_value(
                 state, actor, move, unit_states.get(actor, DEFAULT_UNIT_STATE),
                 posture, params)
@@ -226,7 +248,9 @@ def allocate_adaptive_focus_fire(state, n_agents, unit_states=None, all_in=False
         attack_result = allocate_focus_fire(
             restricted, n_agents,
             previous_assignments={a: t for a, t in (previous_attack_assignments or {}).items()
-                                  if a in attackers})
+                                  if a in attackers},
+            parameters={k: v for k, v in (parameters or {}).items()
+                        if k in ("window_fire", "target_scoring", "window_tolerance")})
         attack_assignments = attack_result["assignments"]
     else:
         attack_assignments = {}

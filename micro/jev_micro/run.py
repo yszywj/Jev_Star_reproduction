@@ -129,6 +129,9 @@ async def run(args, api_key):
     skill_manager = SkillManager(args.skill_max_steps, risk_threshold=args.cover_risk_threshold,
                                  safe_streak_required=args.cover_safe_streak,
                                  heal_switch_margin=args.heal_switch_margin,
+                                 combat_params={"window_fire": args.adaptive_window_fire,
+                                                "range_preserving_move": args.adaptive_range_preserving_move,
+                                                "target_scoring": args.adaptive_target_scoring},
                                  adaptive_params={"max_retreat_steps": args.adaptive_max_retreat_steps,
                                                   "stall_steps": args.adaptive_stall_steps,
                                                   "risk_threshold": args.cover_risk_threshold,
@@ -592,7 +595,10 @@ async def run(args, api_key):
                           "adaptive_max_retreat_steps": args.adaptive_max_retreat_steps,
                           "adaptive_stall_steps": args.adaptive_stall_steps,
                           "adaptive_disable_retreat": args.adaptive_disable_retreat,
-                          "adaptive_disable_all_in": args.adaptive_disable_all_in},
+                          "adaptive_disable_all_in": args.adaptive_disable_all_in,
+                          "adaptive_window_fire": args.adaptive_window_fire,
+                          "adaptive_range_preserving_move": args.adaptive_range_preserving_move,
+                          "adaptive_target_scoring": args.adaptive_target_scoring},
                 "latency_median_ms": statistics.median(latencies) if latencies else None,
                 "latency_max_ms": max(latencies) if latencies else None,
                 "wall_seconds": round(time.monotonic() - started, 3), "failure": failure,
@@ -665,6 +671,12 @@ def build_parser():
                         help="AdaptiveFocusFire ablation: disable local retreats (pure coordinated attack)")
     parser.add_argument("--adaptive-disable-all-in", action="store_true",
                         help="AdaptiveFocusFire ablation: never enter All-in")
+    parser.add_argument("--adaptive-window-fire", action="store_true",
+                        help="Sharpy-inspired: count weapons whose cooldown expires within the control window as available fire")
+    parser.add_argument("--adaptive-range-preserving-move", action="store_true",
+                        help="Sharpy-inspired: movement scoring that preserves the next attack opportunity (tactical) vs emergency retreat")
+    parser.add_argument("--adaptive-target-scoring", action="store_true",
+                        help="Sharpy-inspired: bounded target value terms (damage taken, proximity, overkill) in focus target ordering")
     parser.add_argument("--heal-switch-margin", type=float, default=0.15,
                         help="HealAssign: score bonus for keeping the previous heal target")
     parser.add_argument("--cover-risk-threshold", type=risk_threshold_value, default=0.35,

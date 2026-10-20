@@ -17,7 +17,7 @@ class SkillManager:
     """
 
     def __init__(self, max_steps=4, risk_threshold=None, safe_streak_required=2,
-                 heal_switch_margin=None, adaptive_params=None):
+                 heal_switch_margin=None, adaptive_params=None, combat_params=None):
         self.max_steps = max_steps
         self.safe_streak_required = max(1, safe_streak_required)
         self.cover_params = dict(COVER_PARAMS)
@@ -29,6 +29,9 @@ class SkillManager:
         self.adaptive_params = dict(ADAPTIVE_PARAMS)
         if adaptive_params:
             self.adaptive_params.update(adaptive_params)
+        # Shared Sharpy-inspired combat mechanisms (window fire, move scoring,
+        # target scoring): one source of truth for every skill.
+        self.combat_params = dict(combat_params or {})
         self.stats = {"activations": 0, "steps": 0, "terminations": {},
                       "reassignments": 0, "estimated_overkill": 0.0,
                       "predicted_damage": 0.0, "selections": {},
@@ -66,6 +69,7 @@ class SkillManager:
         self.stall_steps = 0
         self.contacted = False
         self._last_enemy_health = None
+        self._last_move = {}  # per-unit previous movement direction (anti ping-pong)
 
     # -- selection -------------------------------------------------------
 
@@ -121,7 +125,8 @@ class SkillManager:
     def _step_focus_fire(self, payload, n_agents):
         state = payload["state"]
         result = allocate_focus_fire(state, n_agents, priority_target=self.priority_target,
-                                     previous_assignments=self.target_assignments or None)
+                                     previous_assignments=self.target_assignments or None,
+                                     parameters=self.combat_params)
         reassigned = bool(self.target_assignments) and result["assignments"] != self.target_assignments
         if reassigned:
             self.stats["reassignments"] += 1
@@ -164,9 +169,11 @@ class SkillManager:
         # Per-unit hysteresis: the previous step's retreating set decides who
         # is judged at the tightened continue threshold; first-step and newly
         # endangered units always use the full entry threshold.
-        result = allocate_cover_retreat(state, n_agents, parameters=self.cover_params,
+        result = allocate_cover_retreat(state, n_agents,
+                                        parameters={**self.cover_params, **self.combat_params},
                                         previous_assignments=self.target_assignments or None,
-                                        retreating_units=self.retreat_units)
+                                        retreating_units=self.retreat_units,
+                                        move_history=self._last_move)
         self.last_observation_step = state["game_loop"]
         self.skill_start_step = self.skill_start_step if self.skill_start_step is not None \
             else state["game_loop"]
@@ -180,6 +187,10 @@ class SkillManager:
         self.retreat_units = result["retreat_units"]
         self.cover_units = result["cover_units"]
         self.target_assignments = result["cover_assignments"]
+        for actor in self.retreat_units:
+            action = result["actions"][int(actor[1:])]
+            if action in (2, 3, 4, 5):
+                self._last_move[actor] = action
         if result["retreat_units"]:
             first = result["retreat_units"][0]
             action = result["actions"][int(first[1:])]
@@ -299,7 +310,7 @@ class SkillManager:
         result = allocate_adaptive_focus_fire(
             state, n_agents, unit_states=self.unit_states, all_in=self.all_in,
             stall=self.stall_steps, contacted=self.contacted, posture=self.posture,
-            parameters=self.adaptive_params,
+            parameters={**self.adaptive_params, **self.combat_params},
             previous_attack_assignments=self.target_assignments or None)
         all_in_started_now = result["all_in"] and not self.all_in
         previous_roles = {a: v.get("role") for a, v in self.unit_states.items()}

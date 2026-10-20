@@ -111,6 +111,9 @@ def main():
     parser.add_argument("--adaptive-stall-steps", type=int, default=6)
     parser.add_argument("--adaptive-disable-retreat", action="store_true")
     parser.add_argument("--adaptive-disable-all-in", action="store_true")
+    parser.add_argument("--adaptive-window-fire", action="store_true")
+    parser.add_argument("--adaptive-range-preserving-move", action="store_true")
+    parser.add_argument("--adaptive-target-scoring", action="store_true")
     parser.add_argument("--heal-switch-margin", type=float, default=0.15)
     parser.add_argument("--cover-risk-threshold", type=float, default=0.35)
     parser.add_argument("--cover-safe-streak", type=int, default=2)
@@ -143,7 +146,9 @@ def main():
                     "skill_mode", "skill_max_steps", "skill_name",
                     "cover_risk_threshold", "cover_safe_streak", "heal_switch_margin",
                     "adaptive_posture", "adaptive_max_retreat_steps", "adaptive_stall_steps",
-                    "adaptive_disable_retreat", "adaptive_disable_all_in"):
+                    "adaptive_disable_retreat", "adaptive_disable_all_in",
+                    "adaptive_window_fire", "adaptive_range_preserving_move",
+                    "adaptive_target_scoring"):
             if previous.get(key) != settings.get(key):
                 parser.error(f"Resume settings differ: {key}")
         if previous.get("planner", "none") != settings["planner"]:
@@ -201,6 +206,12 @@ def main():
                 command.append("--adaptive-disable-retreat")
             if args.adaptive_disable_all_in:
                 command.append("--adaptive-disable-all-in")
+            if args.adaptive_window_fire:
+                command.append("--adaptive-window-fire")
+            if args.adaptive_range_preserving_move:
+                command.append("--adaptive-range-preserving-move")
+            if args.adaptive_target_scoring:
+                command.append("--adaptive-target-scoring")
             if args.planner == "codex" and policy == "jev":
                 command.extend(["--planner", "codex", "--planner-model", args.planner_model,
                                 "--planner-effort", args.planner_effort,

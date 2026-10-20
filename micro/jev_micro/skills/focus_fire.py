@@ -32,6 +32,8 @@ Model assumptions and scope (first version, deliberately conservative):
 
 import math
 
+from .combat_timing import can_fire_within_window, window_loops
+
 NO_ATTACK_FALLBACK = None  # A living unit with no legal action at all.
 
 
@@ -79,43 +81,80 @@ def expected_damage(state, actor, enemy_id):
     return round(per_hit * hits, 3)
 
 
-def _countable(state, actor, relation):
-    """True when this attacker's next attack is plausibly imminent and known."""
-    return (state["allies"][actor]["weapon_ready"]
-            and relation["smac_attack_available"]
-            and relation["in_weapon_range"] is not False)
+def _countable(state, actor, enemy_id, relation, parameters=None):
+    """True when this attacker plausibly contributes damage in this window.
+
+    Default (window_fire off) keeps the original semantics: weapon ready now.
+    With window_fire on — inspired by Sharpy's ready_to_shoot(), redesigned
+    for SMAC's fixed step_mul — a weapon whose cooldown expires within the
+    current control window also counts, so a 3-loop cooldown under an 8-loop
+    step no longer reads as "cannot fight". Either way this is a *budget
+    prediction*, never an observed hit.
+    """
+    if not relation["smac_attack_available"] or relation["in_weapon_range"] is False:
+        return False
+    if parameters and parameters.get("window_fire"):
+        return can_fire_within_window(state, actor, enemy_id, parameters=parameters)
+    return bool(state["allies"][actor]["weapon_ready"])
 
 
-def _attacker_order(state, actor, enemy_id, relation, damage, previous_assignments):
-    """Deterministic attacker preference for one target (smaller is better)."""
+def _attacker_order(state, actor, enemy_id, relation, damage, previous_assignments,
+                    parameters=None):
+    """Deterministic attacker preference for one target (smaller is better).
+
+    Balanced ordering: window fire opportunity first, then actual range and
+    position, then expected damage contribution, then the (demoted) bonus for
+    keeping the previous target, then stable IDs. Keeping an old target must
+    not mask a clearly better kill opportunity, so hysteresis no longer
+    dominates.
+    """
+    fires_this_window = (can_fire_within_window(state, actor, enemy_id,
+                                                 parameters=parameters)
+                         if (parameters or {}).get("window_fire")
+                         else bool(state["allies"][actor]["weapon_ready"]))
     return (
-        0 if (previous_assignments or {}).get(actor) == enemy_id else 1,  # hysteresis
+        0 if fires_this_window else 1,
         0 if relation["in_weapon_range"] is True else 1,
-        0 if state["allies"][actor]["weapon_ready"] else 1,
         -(damage if damage is not None else 0.0),
+        0 if (previous_assignments or {}).get(actor) == enemy_id else 1,  # hysteresis
         int(actor[1:]),
     )
 
 
-def _target_order(state, enemy_id, priority_target, legal_attackers, damage_sum):
+def _target_order(state, enemy_id, priority_target, legal_attackers, damage_sum,
+                  parameters=None):
     """Deterministic target priority (smaller is better).
 
-    Priority target first, then most attackers able to hit it, then cheapest
-    to kill, then lowest effective health, then enemy ID as final tie-break.
+    Base order: priority target, most attackers able to hit it, cheapest to
+    kill, lowest effective health, enemy ID. With target_scoring on, a
+    bounded Sharpy-style value is added AFTER the kill-cost constraint: target
+    damage taken (already hurt targets are closer to dying), proximity, and an
+    overkill penalty. Soft score never overrides legality or kill economics.
     """
     enemy = state["visible_enemies"][enemy_id]
     need = effective_health(enemy)
     attacks_to_kill = math.ceil(need / damage_sum) if damage_sum > 0 else float("inf")
+    score = 0.0
+    if (parameters or {}).get("target_scoring"):
+        # Bounded, explainable terms on top of the base order.
+        damage_taken = 1.0 - min(1.0, need / max(1.0, enemy["max_health"] + enemy["max_shield"]))
+        distances = [row[enemy_id]["distance"]
+                     for row in state.get("relations", {}).values()
+                     if enemy_id in row and row[enemy_id].get("smac_attack_available")]
+        proximity = 1.0 - min(1.0, (min(distances) / 12.0)) if distances else 0.0
+        overkill = min(1.0, max(0.0, damage_sum - need) / max(1.0, need))
+        score = round(-(0.5 * damage_taken + 0.3 * proximity - 0.2 * overkill), 3)
     return (
         0 if enemy_id == priority_target else 1,
         -legal_attackers,
         attacks_to_kill,
+        score,
         need,
         int(enemy_id[1:]),
     )
 
 
-def target_priority(state, priority_target=None, previous_assignments=None):
+def target_priority(state, priority_target=None, previous_assignments=None, parameters=None):
     """Ordered list of visible enemy IDs with deterministic tie-breaking."""
     relations = state.get("relations", {})
     priority_target = priority_target if priority_target in state["visible_enemies"] else None
@@ -128,16 +167,17 @@ def target_priority(state, priority_target=None, previous_assignments=None):
                 continue
             if relation["smac_attack_available"]:
                 legal += 1
-                if _countable(state, actor, relation):
+                if _countable(state, actor, enemy_id, relation, parameters):
                     damage = expected_damage(state, actor, enemy_id)
                     if damage is not None:
                         ready_damage += damage
-        rows.append((_target_order(state, enemy_id, priority_target, legal, ready_damage), enemy_id))
+        rows.append((_target_order(state, enemy_id, priority_target, legal, ready_damage,
+                                   parameters), enemy_id))
     return [enemy_id for _, enemy_id in sorted(rows)]
 
 
 def allocate_focus_fire(state, n_agents, priority_target=None,
-                        pending_damage=None, previous_assignments=None):
+                        pending_damage=None, previous_assignments=None, parameters=None):
     """Assign attackers to visible targets under a per-target damage budget.
 
     ``pending_damage`` is accepted for interface compatibility but ignored
@@ -152,13 +192,15 @@ def allocate_focus_fire(state, n_agents, priority_target=None,
     """
     previous_assignments = previous_assignments or {}
     allies, relations = state["allies"], state.get("relations", {})
-    targets = target_priority(state, priority_target, previous_assignments)
+    targets = target_priority(state, priority_target, previous_assignments, parameters)
     attackers = sorted((actor for actor, unit in allies.items() if unit["alive"]), key=lambda a: int(a[1:]))
 
     damage = {(actor, enemy_id): expected_damage(state, actor, enemy_id)
               for actor in attackers for enemy_id in targets}
     need = {enemy_id: max(0.0, effective_health(state["visible_enemies"][enemy_id])) for enemy_id in targets}
     predicted = {enemy_id: 0.0 for enemy_id in targets}
+    immediate = {enemy_id: 0.0 for enemy_id in targets}
+    window_only = {enemy_id: 0.0 for enemy_id in targets}
     assignments, unknown_damage = {}, {}
 
     free = list(attackers)
@@ -168,18 +210,22 @@ def allocate_focus_fire(state, n_agents, priority_target=None,
              if relations.get(actor, {}).get(enemy_id, {}).get("smac_attack_available")),
             key=lambda actor: _attacker_order(state, actor, enemy_id,
                                               relations[actor][enemy_id], damage[(actor, enemy_id)],
-                                              previous_assignments))
+                                              previous_assignments, parameters))
         for actor in ordered:
             if predicted[enemy_id] >= need[enemy_id]:
                 break  # Budget met; keep remaining attackers for later targets.
             assignments[actor] = enemy_id
             free.remove(actor)
             pair = damage[(actor, enemy_id)]
-            if _countable(state, actor, relations[actor][enemy_id]):
+            if _countable(state, actor, enemy_id, relations[actor][enemy_id], parameters):
                 if pair is None:
                     unknown_damage[actor] = enemy_id  # Assigned but not budgeted.
                 else:
                     predicted[enemy_id] += pair
+                    if state["allies"][actor]["weapon_ready"]:
+                        immediate[enemy_id] += pair
+                    else:
+                        window_only[enemy_id] += pair
     # Attackers with no budget slot left still fire somewhere useful: their
     # best legal target in priority order. Their damage becomes overkill.
     overflow = {}
@@ -189,8 +235,12 @@ def allocate_focus_fire(state, n_agents, priority_target=None,
         if options:
             assignments[actor] = options[0]
             overflow[actor] = options[0]
-            if _countable(state, actor, relations[actor][options[0]]) and damage[(actor, options[0])] is not None:
+            if _countable(state, actor, options[0], relations[actor][options[0]], parameters)                     and damage[(actor, options[0])] is not None:
                 predicted[options[0]] += damage[(actor, options[0])]
+                if state["allies"][actor]["weapon_ready"]:
+                    immediate[options[0]] += damage[(actor, options[0])]
+                else:
+                    window_only[options[0]] += damage[(actor, options[0])]
 
     overkill = {enemy_id: round(max(0.0, predicted[enemy_id]
                                     - effective_health(state["visible_enemies"][enemy_id])), 2)
@@ -230,6 +280,13 @@ def allocate_focus_fire(state, n_agents, priority_target=None,
         "actions": actions,
         "target_priority": targets,
         "predicted_damage": {enemy_id: round(value, 2) for enemy_id, value in predicted.items()},
+        # Diagnostic split: damage from weapons ready NOW vs damage that only
+        # becomes possible within this control window (window_fire on).
+        # Both are predictions; neither is observed/actual damage.
+        "immediate_damage": {enemy_id: round(value, 2) for enemy_id, value in immediate.items()},
+        "window_only_damage": {enemy_id: round(value, 2) for enemy_id, value in window_only.items()},
+        "window_fire_enabled": bool((parameters or {}).get("window_fire")),
+        "target_scoring_enabled": bool((parameters or {}).get("target_scoring")),
         "pending_damage_applied": {},  # Cross-step ledger disabled; see docstring.
         "estimated_overkill": overkill,
         "budget_deficit": budget_deficit,

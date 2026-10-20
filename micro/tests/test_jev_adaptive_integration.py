@@ -270,10 +270,15 @@ class SuiteForwardingTests(unittest.TestCase):
             output, commands = self.run_suite(
                 tmp, ["--maps", "3m", "--policies", "nearest", "--episodes", "1",
                       "--skill-mode", "always", "--skill-name", "adaptive_focus_fire",
-                      "--adaptive-disable-retreat", "--adaptive-disable-all-in"])
+                      "--adaptive-disable-retreat", "--adaptive-disable-all-in",
+                      "--adaptive-window-fire", "--adaptive-range-preserving-move",
+                      "--adaptive-target-scoring"])
             forwarded = commands[0]
             self.assertIn("--adaptive-disable-retreat", forwarded)
             self.assertIn("--adaptive-disable-all-in", forwarded)
+            for flag in ("--adaptive-window-fire", "--adaptive-range-preserving-move",
+                         "--adaptive-target-scoring"):
+                self.assertIn(flag, forwarded)
             settings = json.loads((output / "suite.json").read_text(encoding="utf-8"))
             self.assertTrue(settings["adaptive_disable_retreat"])
             # Resume with a different ablation configuration must be rejected.

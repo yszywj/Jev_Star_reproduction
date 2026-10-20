@@ -25,6 +25,7 @@ Model assumptions and scope (first version):
 """
 
 from .focus_fire import allocate_focus_fire, fallback_action
+from .movement_scoring import select_movement as scored_select_movement
 
 # Central, configurable thresholds. "观测事实" (threats, distances, health)
 # are separated from "风险估计" (the risk score) in every returned record.
@@ -36,6 +37,9 @@ PARAMS = {
     "danger_radius": 5.5,        # post-move distance under which an enemy is considered dangerous
     "support_distance": 6.0,     # allies within this range provide support
     "improvement_min": 0.1,      # retreat move must improve min threat distance by at least this
+    "range_preserving_move": False,  # Task 3 upgrade: Sharpy-style move scoring
+    "emergency_ratio": 0.15,     # survival ratio below which a retreat becomes EmergencyRetreat
+    "emergency_recent_loss": 0.5,  # or this much recent loss in one window
 }
 
 
@@ -104,7 +108,8 @@ def detect_retreat_candidates(state, parameters=None, retreating=frozenset()):
     return candidates
 
 
-def select_retreat_action(state, actor, retreat_units, parameters=None, previous_action=None):
+def select_retreat_action(state, actor, retreat_units, parameters=None, previous_action=None,
+                          movement_mode=None):
     """Pick the safest legal move for one retreating unit.
 
     Scores every legal movement candidate: maximize distance to the closest
@@ -117,6 +122,19 @@ def select_retreat_action(state, actor, retreat_units, parameters=None, previous
     if not moves:
         return None, "no_legal_moves", {}
     relations = state.get("relations", {}).get(actor, {})
+
+    if params.get("range_preserving_move"):
+        # Sharpy-inspired range-preserving scoring (Task 3 upgrade): the focus
+        # target is the closest attack-compatible visible enemy; the mode
+        # (tactical vs emergency) is chosen by the caller.
+        target_id = min((e for e, r in relations.items()
+                         if r.get("smac_attack_available")),
+                        key=lambda e: (relations[e]["distance"], int(e[1:])), default=None)
+        if target_id is not None:
+            action, reason, info = scored_select_movement(
+                state, actor, target_id, movement_mode or "tactical",
+                previous_action=previous_action, parameters=parameters)
+            return action, reason, info
     current_min = min((r["distance"] for r in relations.values()), default=None)
 
     supporters = [u["position"] for a, u in state["allies"].items()
@@ -193,7 +211,7 @@ def threat_priority(state, retreat_units, cover_units):
 
 
 def allocate_cover_retreat(state, n_agents, parameters=None, previous_assignments=None,
-                           retreating_units=None):
+                           retreating_units=None, move_history=None):
     """One CoverRetreat decision step on a fresh snapshot.
 
     ``retreating_units`` carries the previous step's retreating set for
@@ -210,10 +228,21 @@ def allocate_cover_retreat(state, n_agents, parameters=None, previous_assignment
 
     retreat_actions, retreat_telemetry = {}, {}
     for actor in retreat_units:
+        unit = state["allies"][actor]
+        maximum = (unit["max_health"] or 0) + (unit["max_shield"] or 0) or 1
+        recent_loss = (unit.get("health_lost_since_previous_decision", 0)
+                       + unit.get("shield_lost_since_previous_decision", 0)) / maximum
+        # Mortality risk -> EmergencyRetreat; otherwise TacticalReposition,
+        # which tries to stay at fighting distance (Sharpy-inspired, Task 3).
+        movement_mode = ("emergency"
+                         if survival_ratio(unit) < params["emergency_ratio"]
+                         or recent_loss >= params["emergency_recent_loss"]
+                         else "tactical")
         action, reason, detail = select_retreat_action(
-            state, actor, set(retreat_units), params, previous_action=None)
+            state, actor, set(retreat_units), params,
+            previous_action=(move_history or {}).get(actor), movement_mode=movement_mode)
         retreat_actions[actor] = action  # None -> degraded fallback below.
-        retreat_telemetry[actor] = {"reason": reason, **detail}
+        retreat_telemetry[actor] = {"reason": reason, "movement_mode": movement_mode, **detail}
 
     priorities = threat_priority(state, retreat_units, cover_units) if retreat_units else []
     cover_assignments, cover_result = {}, None
