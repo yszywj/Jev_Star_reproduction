@@ -1,0 +1,31 @@
+{
+  "maps": [
+    "3m",
+    "3s_vs_3z"
+  ],
+  "all_maps": false,
+  "policies": [
+    "jev"
+  ],
+  "episodes": 3,
+  "seed": 1,
+  "step_mul": 8,
+  "model": "jev-1.13.0",
+  "request_timeout": 15.0,
+  "max_requests": null,
+  "batch_concurrency": 4,
+  "api_retries": 2,
+  "sc2_path": "C:\\Program Files (x86)\\StarCraft II",
+  "output_dir": "C:\\Users\\ry\\skill\\game_skill\\micro\\jev_runs\\micro-astra",
+  "resume": false,
+  "planner": "codex",
+  "planner_model": "gpt-6-astra",
+  "planner_effort": "medium",
+  "planner_timeout": 180.0,
+  "codex_path": null,
+  "opponent": "base",
+  "realtime": false,
+  "use_ability": false,
+  "planned_runs": 2,
+  "planned_episodes": 6
+}

@@ -1,0 +1,44 @@
+{
+  "episode": 1,
+  "policy": "jev",
+  "status": "loss",
+  "steps": 46,
+  "requests": 46,
+  "reward": 9.669117647058824,
+  "input_tokens": 296670,
+  "output_tokens": 8003,
+  "opponent_script": "smac_hard.env.scripts.base_script",
+  "opponent_class": "DecisionTreeScript",
+  "initial": {
+    "allies_alive": 3,
+    "enemies_alive": 3,
+    "allied_health": 240.0,
+    "enemy_health": 300.0,
+    "allied_shield": 240.0,
+    "enemy_shield": 150.0
+  },
+  "initial_game_loop": 0,
+  "episode_limit": 150,
+  "scenario_brief_sha256": "8ac49ff3e8a8139b0235339e680899b7e3cd3b0072b6113ef118f9f69a848020",
+  "game_version": "5.0.17.98310",
+  "base_build": 98310,
+  "plan_sha256": "35bac3c948df7a7445d1580a74353fa6143189580ea73e2ce22e4362db1a3248",
+  "final_info": {
+    "battle_won": false,
+    "dead_allies": 3,
+    "dead_enemies": 2
+  },
+  "wall_seconds": 63.031,
+  "estimated_api_cost_usd": 0.01246014,
+  "final": {
+    "allies_alive": 0,
+    "enemies_alive": 1,
+    "allied_health": 0.0,
+    "enemy_health": 100.0,
+    "allied_shield": 0,
+    "enemy_shield": 49.25
+  },
+  "final_game_loop": 368,
+  "game_seconds": 16.429,
+  "replay": "C:\\Users\\ry\\skill\\game_skill\\micro\\jev_runs\\micro-astra\\3s_vs_3z\\jev\\episode-001\\game.SC2Replay"
+}

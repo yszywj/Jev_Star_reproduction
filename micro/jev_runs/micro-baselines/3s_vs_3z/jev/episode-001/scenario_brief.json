@@ -1,0 +1,141 @@
+{
+  "version": 1,
+  "map": "3s_vs_3z",
+  "objective": "Eliminate opposing units before the episode limit; no production or reinforcements.",
+  "public_map_facts": {
+    "source": "SMAC_HARD_maps\\3s_vs_3z.SC2Map",
+    "map_sha256": "49d28383ad5ba4e45a0c23854dd1d64a525f0a454dd63669b8dd751eadd18859",
+    "members": [
+      "MapScript.galaxy",
+      "Objects"
+    ],
+    "rosters": {
+      "allies": {
+        "Stalker": 3
+      },
+      "enemies": {
+        "Zealot": 3
+      }
+    },
+    "initial_spawns": [
+      {
+        "side": "allies",
+        "type": "Stalker",
+        "count": 3,
+        "spawn_anchor": [
+          9.0,
+          16.0
+        ],
+        "point_id": "1685340431"
+      },
+      {
+        "side": "enemies",
+        "type": "Zealot",
+        "count": 3,
+        "spawn_anchor": [
+          23.0,
+          16.0
+        ],
+        "point_id": "960597521"
+      }
+    ],
+    "initial_upgrade_calls": [],
+    "scope": "Literal fixed initialization in the map assets, not runtime enemy observations. Spawn anchors are not exact per-unit positions. Not a complete Galaxy evaluator; custom unit overrides are not inferred from unused XML entries."
+  },
+  "terrain": {
+    "status": "known",
+    "source": "game_info.start_raw ImageData, row-major [y,x] -> world [x,y], no y flip; pathing matches action-mask grid",
+    "playable_area": [
+      [
+        2,
+        2
+      ],
+      [
+        30,
+        30
+      ]
+    ],
+    "map_size": [
+      32,
+      32
+    ],
+    "geometry_units": "World unit grid cells; all intervals are half-open. +x east, +y north. Walkable spans give exact openings at cell resolution, not clearance for a unit radius. Static terrain ignores moving units. Air movement is not constrained by ground pathing.",
+    "walkable_spans": [
+      {
+        "y": [
+          2,
+          30
+        ],
+        "x_intervals": [
+          [
+            2,
+            30
+          ]
+        ]
+      }
+    ],
+    "ground_components_4_connected": [
+      {
+        "cells": 784,
+        "bounds": [
+          [
+            2,
+            2
+          ],
+          [
+            30,
+            30
+          ]
+        ],
+        "seed": [
+          2,
+          2
+        ]
+      }
+    ],
+    "walkable_height_histogram_normalized": {
+      "0.749": 784
+    },
+    "walkable_height_spans": [
+      {
+        "y": [
+          2,
+          30
+        ],
+        "x_start_end_height": [
+          [
+            2,
+            30,
+            0.749
+          ]
+        ]
+      }
+    ]
+  },
+  "opponent": {
+    "configured_policy": "base",
+    "selected_class": "smac_hard.env.scripts.base_script.DecisionTreeScript",
+    "source": "smac_hard\\env\\scripts\\base_script.py",
+    "source_sha256": "4fb72e9d17880f3c48882094b740fea9339fc9ae3ff7fedec9a8961963f0d1c3",
+    "wait_before_step": 5,
+    "attack_move_destination": [
+      9,
+      16
+    ],
+    "behavior": "After the wait, repeatedly attack-move toward the fixed destination. Upstream base Medivacs follow the allied centroid on mixed maps. For 2vr_vs_3sc, base issues no commands and relies on automatic Spore Crawler attacks."
+  },
+  "action_contract": {
+    "attack_candidate_center_distance_cap": 6,
+    "attack_candidate_rule": "Living, visible, compatible targets within center distance 6; use supplied criteria. This SMAC cap is independent of native weapon range and cooldown.",
+    "range_estimate": "Center distance <= native weapon range + both unit radii. null means unknown; geometry alone does not guarantee line of sight, weapon firing or an available action.",
+    "attack_order": "Approach if needed, fire when ready; accepted is not fired.",
+    "abilities_enabled": false,
+    "actions": "0 dead only; 1 Stop cancels order; 2/3/4/5 N/S/E/W movement endpoints; 6+j attack visible e{j}, or heal u{j} for Medivacs. No hold-order choice."
+  },
+  "unknowns": [
+    "Runtime state of unseen enemies",
+    "Complete effects of all custom map data"
+  ],
+  "live_visibility": "Enemy health and positions during play still come only from allied vision.",
+  "sha256": "8ac49ff3e8a8139b0235339e680899b7e3cd3b0072b6113ef118f9f69a848020"
+}

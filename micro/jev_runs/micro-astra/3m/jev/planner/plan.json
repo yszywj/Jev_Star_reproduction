@@ -1,0 +1,26 @@
+{
+  "map": "3m",
+  "objective": "Eliminate all three enemy Marines within 60 decisions. Apply this plan independently each episode: secure the first kill through concentrated fire, then preserve the numerical advantage.",
+  "opening": "Advance together east toward central contact, maintaining a compact front so all three Marines can contribute promptly. The opponent initially waits, then attack-moves toward the allied spawn; avoid prolonged waiting or a lone forward chase. Once enemies appear, choose engagement positions from current observations. The arena is flat and connected, with walkable cells x in [2,30), y in [7,25); there is no terrain choke or height advantage.",
+  "target_selection": "Use a shared deterministic focus ranking: prefer enemies currently in range with legal attacks for the most allies, then lowest health plus shields, then shortest distance to the allied centroid, then lowest enemy index. Maintain an existing shared focus while it remains comparably accessible. Each Marine attacks that focus if legal and practical; otherwise attack the highest-ranked enemy already in its own range rather than sacrificing a ready shot to chase. Do not assume teammates' pending attacks or predicted damage will finish a target.",
+  "movement_and_cooldowns": "A ready Marine with a legal in-range target normally attacks. During cooldown, retain the attack by selecting it again unless retreat provides a clear survival benefit. Eight loops advance per decision, so a two-unit move can delay the next shot; avoid automatic attack-move alternation. Attack availability extends to center distance 6 and can require approach beyond actual firing range. Use supplied range status. For retreat, prefer legal endpoints increasing distance from nearby threats while staying near supporting allies; break equivalent endpoint ties by lower action ID. Stop cancels orders and is only for deliberate waiting or halting an unsafe approach.",
+  "priorities": [
+    "Concentrate damage and remove an enemy before spreading damage across healthy targets.",
+    "Keep healthy Marines firing while the threatened Marine briefly yields ground.",
+    "Preserve firing uptime and finish promptly; do not retreat the entire team merely because weapons are cooling."
+  ],
+  "contingencies": [
+    "If several allies are threatened, designate the lowest-health recently damaged Marine to retreat first, breaking ties by allied index. Retreat only when an endpoint improves safety; rejoin fire when pressure eases.",
+    "If enemies disappear, regroup and search toward their last observed area, then central and eastern arena areas. Unseen enemies are not confirmed dead.",
+    "If actions fail or range is unknown, use current legal choices and feedback; acceptance alone does not prove firing. As time runs short, favor coordinated pursuit over extended kiting."
+  ],
+  "assumptions": [
+    "Both sides contain only three Marines; no healing, reinforcements, or usable abilities exist."
+  ],
+  "unit_roles": [
+    {
+      "unit_type": "Marine",
+      "guidance": "Every Marine is a damage dealer. Assign the temporary retreat role from current health and recent damage, never permanent identity; healthier allies sustain focus fire and support its return."
+    }
+  ]
+}

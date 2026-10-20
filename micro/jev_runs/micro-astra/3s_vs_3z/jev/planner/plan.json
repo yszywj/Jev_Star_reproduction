@@ -1,0 +1,28 @@
+{
+  "map": "3s_vs_3z",
+  "objective": "Apply this policy independently each episode: eliminate all three Zealots within 150 decisions through focused ranged fire and cooldown kiting, preserving Stalkers.",
+  "opening": "Advance together toward the central search location until enemies appear, retaining modest spacing and room behind the squad. The enemy policy eventually attack-moves toward the allied spawn; use this to invite pursuit, without treating spawn anchors as current positions. Avoid a lone forward scout or prolonged waiting.",
+  "target_selection": "Choose a shared focus among visible Zealots: prefer the target safely attackable by the most ready allies, then lowest health plus shields, then shortest distance to the allied centroid, then lowest enemy index. Keep an existing focus while it remains comparably accessible. Each Stalker attacks that focus only when legal and suitably positioned; otherwise shoot an accessible threat rather than chase through other Zealots. Do not assume exact kill damage or pending allied shots.",
+  "movement_and_cooldowns": "When ready with a legal in-range target and adequate separation, attack. During cooldown, retreat if Zealots are closing; otherwise reissue an appropriate attack to retain pressure. Prioritize escape over firing when surrounded or taking dangerous melee damage. Select legal cardinal endpoints that increase minimum distance from visible Zealots while retaining allied support. Avoid endpoints near multiple enemies. Before reaching a boundary, turn along the open side instead of backing into a corner. Break equally safe movement ties by greater boundary clearance, then proximity to allies, then action ID. Movement can interrupt firing; inspect cooldown and damage changes before assuming a shot occurred.",
+  "priorities": [
+    "Remove one Zealot quickly to reduce pursuit pressure; preserve coordinated firing opportunities.",
+    "Keep threatened Stalkers moving while safer teammates fire; avoid making every ally retreat merely because one is pressured.",
+    "Maintain room to turn within the flat walkable square [2,30) on both axes; static walkability does not guarantee unit clearance."
+  ],
+  "contingencies": [
+    "If shields collapse or health drops, give that Stalker escape priority. Healthier allies keep shooting without deliberately entering melee.",
+    "If enemies disappear, regroup and search toward their last observed area or the center. Unseen does not mean dead.",
+    "If movement is rejected or blocked, choose another supplied endpoint. Acceptance of an attack does not establish firing.",
+    "As time diminishes or only one Zealot remains, shorten unnecessary retreats and maximize safe firing uptime."
+  ],
+  "assumptions": [
+    "Only supplied legal actions are usable; no Blink or other abilities exist.",
+    "Attack availability retains the center-distance cap of 6; check actual range separately. Unknown enemy measurements remain unknown."
+  ],
+  "unit_roles": [
+    {
+      "unit_type": "Stalker",
+      "guidance": "All three are ranged damage dealers and situational pursuers' targets. The currently pressured unit kites; unpressured allies focus fire. Reassign these roles from current distances, shields, health and recent damage rather than fixed identities."
+    }
+  ]
+}

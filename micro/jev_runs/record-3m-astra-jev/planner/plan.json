@@ -1,0 +1,26 @@
+{
+  "map": "3m",
+  "objective": "Win each independent episode by eliminating all three enemy Marines within 60 decisions. Concentrate fire to secure the first kill while preserving three allied weapons.",
+  "opening": "Advance together toward the central search location until contact, keeping the leading Marine close enough for both teammates to join immediately. The opponent eventually attack-moves toward the allied spawn; meet that approach without chasing east alone. Use current visibility to replace spawn-based expectations. The battlefield is flat and open within x=[2,30), y=[7,25); there is no height advantage or choke to seek.",
+  "target_selection": "Choose one shared focus target from visible enemies: prefer targets currently in weapon range with legal attacks for the most allies, then lowest health, then shortest distance to the allied centroid, then lowest enemy index. Retain an existing shared target when its coverage is tied and it remains practical to finish. Each Marine attacks that target when legal; if doing so would require approaching while another enemy is already shootable, fire at the best locally shootable target instead. Do not split fire based on assumed teammate shots or unverified lethal damage.",
+  "movement_and_cooldowns": "A ready Marine with a legal in-range target normally attacks. Reissue the selected attack during cooldown unless repositioning clearly protects a threatened unit; Stop cancels orders. Legal attacks can require approach because the candidate cap is 6 while native range is 5 plus radii. Do not kite the whole team continuously: equal-speed Marines and eight-loop advances make lost firing opportunities costly. Evaluate supplied cardinal endpoints, avoid boundaries, and preserve teammate support.",
+  "priorities": [
+    "Keep all available weapons contributing; finish an accessible wounded enemy before spreading damage.",
+    "Select at most one retreating Marine: among allies taking recent damage, choose lowest health fraction, then greatest recent health loss, then lowest ally index.",
+    "That Marine retreats during cooldown only when a legal endpoint increases separation from threatening enemies without isolating it. Prefer proximity to the other allies; break endpoint ties by action ID.",
+    "Other Marines maintain pressure. Rejoin fire once pressure drops; near the time limit, prioritize attacks and pursuit over repeated retreats."
+  ],
+  "contingencies": [
+    "If the focus disappears, reassess visible targets; disappearance is not a confirmed kill. With no enemies visible, search together toward last observed contact, otherwise the center.",
+    "If retreat offers no useful separation, attack rather than oscillate. If an action is rejected, select from current legal criteria; acceptance alone does not establish firing."
+  ],
+  "assumptions": [
+    "Apply this policy independently across episodes. Current observations override initial positions; no healing, abilities, upgrades, or hidden enemy state are assumed."
+  ],
+  "unit_roles": [
+    {
+      "unit_type": "Marine",
+      "guidance": "Every Marine is a damage dealer. Healthier allies sustain the firing line while the single threatened ally briefly withdraws; roles change with observed damage and health."
+    }
+  ]
+}

@@ -1,0 +1,65 @@
+{
+  "episode": 2,
+  "policy": "nearest",
+  "status": "timeout",
+  "steps": 120,
+  "requests": 0,
+  "reward": 5.9568345323741,
+  "input_tokens": 0,
+  "output_tokens": 0,
+  "opponent_script": "smac_hard.env.scripts.base_script",
+  "opponent_class": "DecisionTreeScript",
+  "initial": {
+    "allies_alive": 8,
+    "enemies_alive": 9,
+    "allied_health": 360.0,
+    "enemy_health": 405.0,
+    "allied_shield": 0.0,
+    "enemy_shield": 0.0
+  },
+  "initial_game_loop": 963,
+  "episode_limit": 120,
+  "scenario_brief_sha256": "7ed90187add50f4a0457d28512d2619cf847c3d52eedbdb4891c9c9d0d5c15ec",
+  "game_version": "5.0.17.98310",
+  "base_build": 98310,
+  "final_info": {
+    "battle_won": false,
+    "dead_allies": 3,
+    "dead_enemies": 3,
+    "episode_limit": true
+  },
+  "wall_seconds": 5.141,
+  "estimated_api_cost_usd": 0.0,
+  "skill": {
+    "mode": "always",
+    "activations": 32,
+    "steps": 120,
+    "mean_steps_per_activation": 3.75,
+    "terminations": {
+      "max_steps": 28,
+      "safe_streak": 3
+    },
+    "reassignments": 0,
+    "role_reassignments": 73,
+    "retreat_unit_steps": 326,
+    "safe_streak_exits": 3,
+    "heal_assignments_created": 0,
+    "heal_target_switches": 0,
+    "heal_self_preserves": 0,
+    "heal_no_target_steps": 0,
+    "predicted_damage": 0.0,
+    "estimated_overkill": 0.0,
+    "fallback_steps": 0
+  },
+  "final": {
+    "allies_alive": 5,
+    "enemies_alive": 6,
+    "allied_health": 33.0,
+    "enemy_health": 228.0,
+    "allied_shield": 0.0,
+    "enemy_shield": 0.0
+  },
+  "final_game_loop": 1923,
+  "game_seconds": 42.857,
+  "replay": "C:\\Users\\ry\\skill\\game_skill\\micro\\jev_runs\\verify-cover-fixed\\episode-002\\game.SC2Replay"
+}

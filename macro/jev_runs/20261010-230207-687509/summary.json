@@ -1,0 +1,157 @@
+{
+  "result": "Tie",
+  "realtime": true,
+  "game_loop": 1341,
+  "game_seconds": 59.86607142857143,
+  "wall_seconds": 78.92200000002049,
+  "steps": 285,
+  "steps_while_inflight": 57,
+  "max_on_step_ms": 140.99999994505197,
+  "economy": {
+    "game_time": "00:59",
+    "worker_supply": 16,
+    "mineral": 215,
+    "gas": 0,
+    "supply_left": 6,
+    "supply_cap": 23,
+    "supply_used": 17,
+    "army_supply": 0,
+    "visible_workers": 16,
+    "pending_workers": 1,
+    "ready_army_supply": 0,
+    "needs_supply": false,
+    "needs_power": false
+  },
+  "api": {
+    "requests": 42,
+    "responses": 42,
+    "input_tokens": 142774,
+    "output_tokens": 1772,
+    "unconsumed_at_shutdown": 1
+  },
+  "actions": {
+    "decisions_executed": 41,
+    "orders_submitted": 9
+  },
+  "macro_contract": "macro-v2.2.1",
+  "production_orders_unresolved": [
+    {
+      "request_id": 21,
+      "action_id": 22,
+      "kind": "GATEWAY",
+      "order_type": "production",
+      "producer_tag": 4347658241,
+      "ability_id": 883,
+      "producer_tags": [
+        4347658241
+      ],
+      "target_tag": null,
+      "position": [
+        34.0,
+        44.0
+      ],
+      "submitted_at": 36.205357142857146,
+      "phase": "started",
+      "unit_tag": 4356308993
+    },
+    {
+      "request_id": 37,
+      "action_id": 0,
+      "kind": "PROBE",
+      "order_type": "production",
+      "producer_tag": 4346347521,
+      "ability_id": 1006,
+      "producer_tags": [
+        4346347521
+      ],
+      "target_tag": null,
+      "position": null,
+      "submitted_at": 54.59821428571429,
+      "phase": "accepted",
+      "unit_tag": null
+    }
+  ],
+  "latency_median_ms": 297.0000000204891,
+  "latency_max_ms": 1204.0000000270084,
+  "note": "Submitted commands are not proof of completed production. Check heartbeat observations/replay.",
+  "schema_version": 2,
+  "run_id": "20261010-230207-687509-2a4c0fcb",
+  "updated_at_utc": "2026-10-10T15:03:26.616+00:00",
+  "status": "completed",
+  "phase": "finished",
+  "failure": null,
+  "checkpoint_deferrals": 0,
+  "telemetry": {
+    "models": {
+      "jev": {
+        "requests": 42,
+        "responses": 42,
+        "errors": 0,
+        "cancelled": 0,
+        "input_tokens": 142774,
+        "output_tokens": 1772,
+        "cached_input_tokens": 0,
+        "reasoning_output_tokens": 0,
+        "responses_with_usage": 42,
+        "priced_responses": 42,
+        "model": "jev-1.13.0",
+        "latency_ms": {
+          "count": 42,
+          "p50": 297.0,
+          "p95": 499.2,
+          "p99": 1120.36,
+          "max": 1204.0
+        },
+        "requests_without_usage": 0,
+        "unpriced_requests": 0,
+        "known_cost_usd": 0.005996508,
+        "billing": "input_token_estimate"
+      },
+      "astra": {
+        "requests": 0,
+        "responses": 0,
+        "errors": 0,
+        "cancelled": 0,
+        "input_tokens": 0,
+        "output_tokens": 0,
+        "cached_input_tokens": 0,
+        "reasoning_output_tokens": 0,
+        "responses_with_usage": 0,
+        "priced_responses": 0,
+        "model": null,
+        "latency_ms": {
+          "count": 0,
+          "p50": null,
+          "p95": null,
+          "p99": null,
+          "max": null
+        },
+        "requests_without_usage": 0,
+        "unpriced_requests": 0,
+        "known_cost_usd": null,
+        "billing": "codex_account_not_priced"
+      }
+    },
+    "events": {
+      "run_start": 1,
+      "environment": 1,
+      "sc2_process_started": 1,
+      "sc2_connected": 1,
+      "start": 1,
+      "request": 42,
+      "action_mask": 42,
+      "heartbeat": 12,
+      "response": 42,
+      "action": 41,
+      "order_lifecycle": 16,
+      "scout_target_changed": 1,
+      "decision_discarded": 1,
+      "end": 1,
+      "run_end": 1
+    },
+    "known_cost_usd": 0.005996508,
+    "cost_complete": true,
+    "total_cost_usd": 0.005996508,
+    "cost_note": "List-price estimate, not an invoice. Missing/cancelled usage and Codex account cost are unknown."
+  }
+}

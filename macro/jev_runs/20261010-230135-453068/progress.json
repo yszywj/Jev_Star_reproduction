@@ -1,0 +1,174 @@
+{
+  "result": "Tie",
+  "realtime": false,
+  "game_loop": 668,
+  "game_seconds": 29.821428571428573,
+  "wall_seconds": 21.875,
+  "steps": 168,
+  "steps_while_inflight": 0,
+  "max_on_step_ms": 16.00000006146729,
+  "economy": {
+    "game_time": "00:29",
+    "worker_supply": 14,
+    "mineral": 95,
+    "gas": 0,
+    "supply_left": 0,
+    "supply_cap": 15,
+    "supply_used": 15,
+    "army_supply": 0,
+    "visible_workers": 14,
+    "pending_workers": 1,
+    "ready_army_supply": 0,
+    "needs_supply": false,
+    "needs_power": false
+  },
+  "api": {
+    "requests": 13,
+    "responses": 13,
+    "input_tokens": 0,
+    "output_tokens": 0
+  },
+  "actions": {
+    "decisions_executed": 13,
+    "orders_submitted": 7
+  },
+  "macro_contract": "macro-v2.2.1",
+  "production_orders_unresolved": [
+    {
+      "request_id": 10,
+      "action_id": 19,
+      "kind": "PYLON",
+      "order_type": "production",
+      "producer_tag": 4349493249,
+      "ability_id": 881,
+      "producer_tags": [
+        4349493249
+      ],
+      "target_tag": null,
+      "position": [
+        34.35480875813545,
+        41.68440723498146
+      ],
+      "submitted_at": 19.821428571428573,
+      "phase": "started",
+      "unit_tag": 4354998273
+    },
+    {
+      "request_id": 11,
+      "action_id": 0,
+      "kind": "PROBE",
+      "order_type": "production",
+      "producer_tag": 4346347521,
+      "ability_id": 1006,
+      "producer_tags": [
+        4346347521
+      ],
+      "target_tag": null,
+      "position": null,
+      "submitted_at": 21.42857142857143,
+      "phase": "accepted",
+      "unit_tag": null
+    },
+    {
+      "request_id": 13,
+      "action_id": 20,
+      "kind": "ASSIMILATOR",
+      "order_type": "production",
+      "producer_tag": 4347920385,
+      "ability_id": 882,
+      "producer_tags": [
+        4347920385
+      ],
+      "target_tag": 4318560257,
+      "position": [
+        32.5,
+        31.5
+      ],
+      "submitted_at": 29.821428571428573,
+      "phase": "accepted",
+      "unit_tag": null
+    }
+  ],
+  "latency_median_ms": 0.0,
+  "latency_max_ms": 15.999999945051968,
+  "note": "Submitted commands are not proof of completed production. Check heartbeat observations/replay.",
+  "schema_version": 2,
+  "run_id": "20261010-230135-453068-3de484ea",
+  "updated_at_utc": "2026-10-10T15:01:57.410+00:00",
+  "status": "completed",
+  "phase": "finished",
+  "failure": null,
+  "checkpoint_deferrals": 0,
+  "telemetry": {
+    "models": {
+      "jev": {
+        "requests": 13,
+        "responses": 13,
+        "errors": 0,
+        "cancelled": 0,
+        "input_tokens": 0,
+        "output_tokens": 0,
+        "cached_input_tokens": 0,
+        "reasoning_output_tokens": 0,
+        "responses_with_usage": 13,
+        "priced_responses": 0,
+        "model": "uniform-random-legal-v1",
+        "latency_ms": {
+          "count": 13,
+          "p50": 0.0,
+          "p95": 16.0,
+          "p99": 16.0,
+          "max": 16.0
+        },
+        "requests_without_usage": 0,
+        "unpriced_requests": 13,
+        "known_cost_usd": 0,
+        "billing": "input_token_estimate"
+      },
+      "astra": {
+        "requests": 0,
+        "responses": 0,
+        "errors": 0,
+        "cancelled": 0,
+        "input_tokens": 0,
+        "output_tokens": 0,
+        "cached_input_tokens": 0,
+        "reasoning_output_tokens": 0,
+        "responses_with_usage": 0,
+        "priced_responses": 0,
+        "model": null,
+        "latency_ms": {
+          "count": 0,
+          "p50": null,
+          "p95": null,
+          "p99": null,
+          "max": null
+        },
+        "requests_without_usage": 0,
+        "unpriced_requests": 0,
+        "known_cost_usd": null,
+        "billing": "codex_account_not_priced"
+      }
+    },
+    "events": {
+      "run_start": 1,
+      "environment": 1,
+      "sc2_process_started": 1,
+      "sc2_connected": 1,
+      "start": 1,
+      "request": 13,
+      "action_mask": 13,
+      "heartbeat": 6,
+      "response": 13,
+      "action": 13,
+      "order_lifecycle": 10,
+      "scout_target_changed": 1,
+      "end": 1,
+      "run_end": 1
+    },
+    "known_cost_usd": 0.0,
+    "cost_complete": false,
+    "total_cost_usd": null,
+    "cost_note": "List-price estimate, not an invoice. Missing/cancelled usage and Codex account cost are unknown."
+  }
+}

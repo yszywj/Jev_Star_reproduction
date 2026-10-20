@@ -1,0 +1,43 @@
+{
+  "episode": 2,
+  "policy": "nearest",
+  "status": "win",
+  "steps": 31,
+  "requests": 0,
+  "reward": 19.999999999999996,
+  "input_tokens": 0,
+  "output_tokens": 0,
+  "opponent_script": "smac_hard.env.scripts.base_script",
+  "opponent_class": "DecisionTreeScript",
+  "initial": {
+    "allies_alive": 3,
+    "enemies_alive": 3,
+    "allied_health": 135.0,
+    "enemy_health": 135.0,
+    "allied_shield": 0.0,
+    "enemy_shield": 0.0
+  },
+  "initial_game_loop": 235,
+  "episode_limit": 60,
+  "scenario_brief_sha256": "0d059a437ff9e9b0900626e7b232e5ea12a076512103c721281747a5c6e13773",
+  "game_version": "5.0.17.98310",
+  "base_build": 98310,
+  "final_info": {
+    "battle_won": true,
+    "dead_allies": 2,
+    "dead_enemies": 3
+  },
+  "wall_seconds": 1.203,
+  "estimated_api_cost_usd": 0.0,
+  "final": {
+    "allies_alive": 1,
+    "enemies_alive": 0,
+    "allied_health": 9.0,
+    "enemy_health": 0.0,
+    "allied_shield": 0.0,
+    "enemy_shield": 0
+  },
+  "final_game_loop": 483,
+  "game_seconds": 11.071,
+  "replay": "C:\\Users\\ry\\skill\\game_skill\\micro\\jev_runs\\micro-baselines\\3m\\nearest\\episode-002\\game.SC2Replay"
+}

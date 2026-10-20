@@ -23,7 +23,6 @@ dist/
 .playwright-cli/
 
 # Original experiments stay in local archives, not Git history
-**/jev_runs/
 **/output/
 *.SC2Replay
 *.mp4

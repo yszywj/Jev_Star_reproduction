@@ -1,0 +1,27 @@
+{
+  "map": "3m",
+  "objective": "Eliminate all three enemy Marines within 60 decisions. Apply this policy independently each episode: concentrate fire for an early kill, preserve firing strength, then finish promptly.",
+  "opening": "Advance together toward the central search location using legal endpoints that reduce search distance without separating from teammates. The enemy initially waits, then attack-moves toward the allied spawn; meet it with all three Marines supporting each other. On contact, stop advancing units already able to fire and bring lagging Marines into range.",
+  "target_selection": "Use a shared target ranking: first enemies legally attackable and currently in range of at least two allies; then lowest health plus shields, greatest ready-in-range allied coverage, shortest distance to the allied centroid, and lowest enemy index. If none has two-unit coverage, prioritize greatest in-range coverage before health. Maintain focus while the target remains competitive. A Marine unable to attack the shared target should shoot its highest-ranked in-range legal alternative, or approach the shared target if no immediate shot exists. Do not assume another ally's pending attack will finish a target.",
+  "movement_and_cooldowns": "When ready with a legal in-range target, normally attack. During cooldown, repeat the attack unless retreat offers a clear survival benefit; movement can sacrifice the next shot, especially when cooldown is at most the 8-loop decision interval. For a threatened Marine, select a legal endpoint increasing distance from nearby enemies while retaining teammate support; break ties by proximity to the allied centroid, then action ID. Reassess after one interval. Attack availability within distance 6 does not prove firing range; use range relations. Stop cancels orders and is not a waiting action.",
+  "priorities": [
+    "Remove one enemy quickly; keep healthy Marines firing while a damaged teammate withdraws.",
+    "Avoid whole-team retreat, isolated pursuit, and repeated movement that prevents firing.",
+    "As time runs short, prioritize closing distance and damage over prolonged preservation."
+  ],
+  "contingencies": [
+    "If several allies take damage, designate only one retreat candidate: lowest health fraction among recently damaged allies, then greatest recent damage, then lowest ally index. Retreat only when the endpoint improves survival; others sustain fire.",
+    "If visibility is lost, regroup and search toward last observed contact, then the central corridor and enemy spawn prior. Unseen enemies remain unknown.",
+    "If an action is rejected or expected progress fails, recheck current legal choices and observations. Acceptance alone does not establish firing."
+  ],
+  "assumptions": [
+    "Combat occurs on one flat walkable rectangle, x in [2,30), y in [7,25); there is no terrain choke or height advantage.",
+    "Spawn anchors and opponent behavior are priors. Current observations govern positions, health, range, and readiness."
+  ],
+  "unit_roles": [
+    {
+      "unit_type": "Marine",
+      "guidance": "Every Marine supplies focused ranged damage. Healthy units maintain contact; the selected wounded unit briefly yields ground and resumes firing when safe. No abilities or healing are available."
+    }
+  ]
+}

@@ -1,0 +1,44 @@
+{
+  "episode": 1,
+  "policy": "nearest",
+  "status": "timeout",
+  "steps": 30,
+  "requests": 0,
+  "reward": 7.9999999999999964,
+  "input_tokens": 0,
+  "output_tokens": 0,
+  "opponent_script": "smac_hard.env.scripts.base_script",
+  "opponent_class": "DecisionTreeScript",
+  "initial": {
+    "allies_alive": 3,
+    "enemies_alive": 3,
+    "allied_health": 135.0,
+    "enemy_health": 135.0,
+    "allied_shield": 0.0,
+    "enemy_shield": 0.0
+  },
+  "initial_game_loop": 0,
+  "episode_limit": 30,
+  "scenario_brief_sha256": "0d059a437ff9e9b0900626e7b232e5ea12a076512103c721281747a5c6e13773",
+  "game_version": "5.0.17.98310",
+  "base_build": 98310,
+  "final_info": {
+    "battle_won": false,
+    "dead_allies": 2,
+    "dead_enemies": 2,
+    "episode_limit": true
+  },
+  "wall_seconds": 18.5,
+  "estimated_api_cost_usd": 0.0,
+  "final": {
+    "allies_alive": 1,
+    "enemies_alive": 1,
+    "allied_health": 3.0,
+    "enemy_health": 9.0,
+    "allied_shield": 0.0,
+    "enemy_shield": 0.0
+  },
+  "final_game_loop": 240,
+  "game_seconds": 10.714,
+  "replay": "C:\\Users\\ry\\game_skill\\micro\\jev_runs\\camera-test\\episode-001\\game.SC2Replay"
+}
