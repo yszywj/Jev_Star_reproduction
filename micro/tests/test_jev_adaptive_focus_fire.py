@@ -197,7 +197,7 @@ class AllInTests(unittest.TestCase):
                                              unit_states={}, heal_capacity=False)
         self.assertTrue(enter)
         self.assertIn("no_damage_progress", reasons)
-        self.assertIn("low_survival_no_heal", reasons)
+        self.assertIn("low_remaining_force(0.18;alive_ratio=0.18)_no_heal", reasons)
 
     def test_healthy_team_never_all_in_on_stall_alone(self):
         state = scene(n_allies=8, n_enemies=8)  # ratio 1.0.
@@ -276,6 +276,101 @@ class EightMFailureMechanismTests(unittest.TestCase):
         result = allocate_adaptive_focus_fire(state, 1, contacted=True, stall=0)
         self.assertFalse(result["all_in"])
         self.assertEqual(result["retreat_units"], ["u0"])
+
+
+class RetreatCapTests(unittest.TestCase):
+    def cooldown_state(self, steps):
+        state = scene(n_allies=2, n_enemies=1, cooldown=(0,), wounded={0: 15})
+        state["allies"]["u0"]["health_lost_since_previous_decision"] = 20
+        return state, {"role": "retreat", "retreat_steps": steps, "retreat_cycles": 0}
+
+    def test_max_retreat_steps_parameter_actually_applies(self):
+        for cap, steps, expected in ((1, 1, False), (2, 1, True), (3, 2, True),
+                                     (1, 0, True), (3, 3, False)):
+            state, unit_state = self.cooldown_state(steps)
+            value, reason = evaluate_retreat_value(
+                state, "u0", 5, unit_state, parameters={"max_retreat_steps": cap})
+            self.assertEqual(value, expected, f"cap={cap}, steps={steps}")
+            if not expected and steps > 0:
+                self.assertEqual(reason, "retreat_cap_reached")
+
+    def test_critical_ready_unit_does_not_bypass_cap(self):
+        # P0 regression: the critical-despite-weapon branch must obey the cap.
+        state = scene(n_allies=2, n_enemies=1, enemy_health=45, wounded={0: 5})
+        state["allies"]["u0"]["health_lost_since_previous_decision"] = 40  # Critical + heavy loss.
+        unit_state = {"role": "retreat", "retreat_steps": 2, "retreat_cycles": 0}
+        value, reason = evaluate_retreat_value(state, "u0", 5, unit_state)
+        self.assertFalse(value)
+        self.assertEqual(reason, "retreat_cap_reached")
+
+    def test_retreat_cap_enforced_in_full_allocation(self):
+        state = wounded_scene()
+        unit_states = {"u6": {"role": "retreat", "retreat_steps": 2, "retreat_cycles": 0}}
+        result = allocate_adaptive_focus_fire(state, 8, unit_states=unit_states,
+                                              parameters={"max_retreat_steps": 2})
+        self.assertNotIn("u6", result["retreat_units"])  # Capped: back to the fire plan.
+        self.assertIn("u7", result["retreat_units"])     # Fresh unit still dodges.
+
+
+class AllInRedesignTests(unittest.TestCase):
+    def test_four_productive_retreats_do_not_trigger(self):
+        # Four DIFFERENT units each completed one normal retreat with damage
+        # progress in between: cycles stay zero (old code summed 4 and tripped).
+        state = scene(n_allies=8, n_enemies=8)
+        unit_states = {f"u{i}": {"role": "attack", "retreat_steps": 0, "retreat_cycles": 0}
+                       for i in range(8)}
+        enter, reasons = should_enter_all_in(state, stall=0, contacted=True,
+                                             unit_states=unit_states, heal_capacity=False)
+        self.assertFalse(enter)
+
+    def test_single_unit_unproductive_loop_triggers(self):
+        state = scene(n_allies=8, n_enemies=8)
+        unit_states = {f"u{i}": {"role": "attack", "retreat_steps": 0, "retreat_cycles": 0}
+                       for i in range(8)}
+        unit_states["u3"]["retreat_cycles"] = 3  # One unit, three fruitless retreats.
+        enter, reasons = should_enter_all_in(state, stall=0, contacted=True,
+                                             unit_states=unit_states, heal_capacity=False)
+        self.assertTrue(enter)
+        self.assertIn("unproductive_retreat_loop(unit_cycles=3)", reasons)
+
+    def test_remaining_force_vs_alive_ratio_are_distinct(self):
+        # 8 marines down to 1 full-HP survivor: alive ratio 1.0 but remaining
+        # force 0.125 — the All-in check must use the roster-based metric.
+        state = scene(n_allies=8, n_enemies=8)
+        for i, actor in enumerate(sorted(state["allies"])):
+            unit = state["allies"][actor]
+            if i > 0:
+                unit["alive"] = False
+                unit["health"] = 0
+        enter, reasons = should_enter_all_in(state, stall=6, contacted=True,
+                                             unit_states={}, heal_capacity=False)
+        self.assertTrue(enter)
+        self.assertIn("alive_ratio=1.00", reasons)  # Both metrics are reported.
+
+    def test_stall_alone_with_strong_force_still_no_all_in(self):
+        state = scene(n_allies=8, n_enemies=8, ally_health=45)
+        enter, _ = should_enter_all_in(state, stall=9, contacted=True,
+                                       unit_states={}, heal_capacity=False)
+        self.assertFalse(enter)
+
+    def test_disable_retreat_ablation_keeps_unified_focus_fire(self):
+        state = wounded_scene()
+        result = allocate_adaptive_focus_fire(state, 8, parameters={"disable_retreat": True})
+        self.assertEqual(result["retreat_units"], [])
+        self.assertEqual(len(result["attack_units"]), 8)  # Still one budget, no fallbacks.
+        self.assertTrue(all(a >= 6 for a in result["actions"]))
+
+    def test_disable_all_in_ablation_never_enters(self):
+        state = scene(n_allies=1, n_enemies=5, wounded={0: 3})
+        unit_states = {"u0": {"role": "retreat", "retreat_steps": 2, "retreat_cycles": 9}}
+        result = allocate_adaptive_focus_fire(state, 1, unit_states=unit_states,
+                                              contacted=True, stall=9,
+                                              parameters={"disable_all_in": True})
+        self.assertFalse(result["all_in"])  # No back door: even sticky input is ignored.
+        result_sticky = allocate_adaptive_focus_fire(state, 1, all_in=True, contacted=True,
+                                                     stall=9,
+                                                     parameters={"disable_all_in": True})
+        self.assertFalse(result_sticky["all_in"])
 
 
 if __name__ == "__main__":

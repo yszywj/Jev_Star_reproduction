@@ -130,7 +130,10 @@ async def run(args, api_key):
                                  safe_streak_required=args.cover_safe_streak,
                                  heal_switch_margin=args.heal_switch_margin,
                                  adaptive_params={"max_retreat_steps": args.adaptive_max_retreat_steps,
-                                                  "stall_steps": args.adaptive_stall_steps})
+                                                  "stall_steps": args.adaptive_stall_steps,
+                                                  "risk_threshold": args.cover_risk_threshold,
+                                                  "disable_retreat": args.adaptive_disable_retreat,
+                                                  "disable_all_in": args.adaptive_disable_all_in})
     episodes, latencies = [], []
     requests = input_tokens = output_tokens = api_errors = action_errors = 0
     fixed_step_checks = 0
@@ -587,7 +590,9 @@ async def run(args, api_key):
                           "heal_switch_margin": args.heal_switch_margin,
                           "adaptive_posture": args.adaptive_posture,
                           "adaptive_max_retreat_steps": args.adaptive_max_retreat_steps,
-                          "adaptive_stall_steps": args.adaptive_stall_steps},
+                          "adaptive_stall_steps": args.adaptive_stall_steps,
+                          "adaptive_disable_retreat": args.adaptive_disable_retreat,
+                          "adaptive_disable_all_in": args.adaptive_disable_all_in},
                 "latency_median_ms": statistics.median(latencies) if latencies else None,
                 "latency_max_ms": max(latencies) if latencies else None,
                 "wall_seconds": round(time.monotonic() - started, 3), "failure": failure,
@@ -656,6 +661,10 @@ def build_parser():
                         help="AdaptiveFocusFire: max consecutive retreat steps per unit")
     parser.add_argument("--adaptive-stall-steps", type=positive_int, default=6,
                         help="AdaptiveFocusFire: contact-made steps without observable enemy damage before tactical reassessment")
+    parser.add_argument("--adaptive-disable-retreat", action="store_true",
+                        help="AdaptiveFocusFire ablation: disable local retreats (pure coordinated attack)")
+    parser.add_argument("--adaptive-disable-all-in", action="store_true",
+                        help="AdaptiveFocusFire ablation: never enter All-in")
     parser.add_argument("--heal-switch-margin", type=float, default=0.15,
                         help="HealAssign: score bonus for keeping the previous heal target")
     parser.add_argument("--cover-risk-threshold", type=risk_threshold_value, default=0.35,

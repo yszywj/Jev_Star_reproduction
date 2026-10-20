@@ -21,7 +21,15 @@ SKILL_INSTRUCTIONS = (
     "endangered allies retreat along legal moves while remaining combatants cover "
     "them with budgeted fire. With heal_assign Medivacs keep a joint, one-to-one "
     "healer/target assignment while other units keep their current control policy. "
-    "Pick the mode and priority that fit the state and plan."
+    "adaptive_focus_fire is the composed mode: EVERY fighting unit stays under the "
+    "focus-fire budget by default, only clearly endangered units briefly retreat "
+    "(capped, then they re-engage), and when retreating stops paying off against a "
+    "severe disadvantage the whole squad commits to an All-in attack. Unlike plain "
+    "focus_fire_budget it never degrades to per-unit fallbacks, and unlike plain "
+    "cover_retreat it never lets the whole squad stop outputting. Use aggressive "
+    "when damage now outweighs survival, defensive when preserving key units for a "
+    "later fight matters most, balanced as the default trade-off. Pick the mode and "
+    "priority that fit the state and plan."
 )
 
 MAX_EXPLICIT_TARGETS = 4

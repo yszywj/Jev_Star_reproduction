@@ -263,6 +263,113 @@ class SuiteForwardingTests(unittest.TestCase):
                     suite.main()
                 self.assertEqual(raised.exception.code, 2)
 
+    def test_ablation_flags_forwarded_and_checked_on_resume(self):
+        import tempfile
+        from jev_micro import suite
+        with tempfile.TemporaryDirectory() as tmp:
+            output, commands = self.run_suite(
+                tmp, ["--maps", "3m", "--policies", "nearest", "--episodes", "1",
+                      "--skill-mode", "always", "--skill-name", "adaptive_focus_fire",
+                      "--adaptive-disable-retreat", "--adaptive-disable-all-in"])
+            forwarded = commands[0]
+            self.assertIn("--adaptive-disable-retreat", forwarded)
+            self.assertIn("--adaptive-disable-all-in", forwarded)
+            settings = json.loads((output / "suite.json").read_text(encoding="utf-8"))
+            self.assertTrue(settings["adaptive_disable_retreat"])
+            # Resume with a different ablation configuration must be rejected.
+            with patch.object(sys, "argv", ["suite", "--maps", "3m", "--policies", "nearest",
+                                            "--episodes", "1", "--skill-mode", "always",
+                                            "--skill-name", "adaptive_focus_fire",
+                                            "--adaptive-disable-all-in",
+                                            "--output-dir", str(output), "--resume"]):
+                with self.assertRaises(SystemExit) as raised:
+                    suite.main()
+                self.assertEqual(raised.exception.code, 2)
+
+
+class AllInAccountingTests(unittest.TestCase):
+    def step_state(self, manager, enemy_delta=0, visible_drop=False):
+        state = scene(n_allies=4, n_enemies=3, enemy_health=30)
+        state["objective"] = "win"
+        state["map"], state["episode"], state["game_loop"] = "8m", 1, \
+            (manager.last_observation_step or 72) + 8
+        state["steps_remaining"] = 50
+        if enemy_delta:
+            for j, enemy in enumerate(sorted(state["visible_enemies"])):
+                state["visible_enemies"][enemy]["health"] += enemy_delta
+        if visible_drop:
+            state["visible_enemies"].pop("e2")
+            for actor in state["relations"]:
+                state["relations"][actor].pop("e2", None)
+        return manager.step({"model": "m", "state": state}, 4)
+
+    def test_productive_retreats_do_not_accumulate_cycles(self):
+        manager = SkillManager(4)
+        manager.select(ADAPTIVE_FOCUS_FIRE)
+        self.step_state(manager)  # Baseline.
+        self.step_state(manager, enemy_delta=-10)  # Damage observed.
+        # u0 retreats, re-engages, damage happens, retreats again: productive.
+        state = scene(n_allies=4, n_enemies=3, enemy_health=30, wounded={0: 5},
+                      cooldown=(0,))
+        state["allies"]["u0"]["health_lost_since_previous_decision"] = 40
+        state["objective"], state["map"] = "win", "8m"
+        state["episode"], state["game_loop"], state["steps_remaining"] = 1, 96, 50
+        manager.step({"model": "m", "state": state}, 4)  # Retreat starts.
+        self.assertEqual(manager.unit_states["u0"]["retreat_cycles"], 0)  # Damage in between.
+        self.step_state(manager, enemy_delta=-5)  # More damage: progress flag set.
+        manager.step({"model": "m", "state": state}, 4)  # Retreat again.
+        self.assertEqual(manager.unit_states["u0"]["retreat_cycles"], 0)
+
+    def test_unproductive_retreats_accumulate_cycles(self):
+        manager = SkillManager(4)
+        manager.select(ADAPTIVE_FOCUS_FIRE)
+        self.step_state(manager)  # Baseline, NO damage ever observed.
+        retreat_state = scene(n_allies=4, n_enemies=3, enemy_health=30, wounded={0: 5},
+                              cooldown=(0,))
+        retreat_state["allies"]["u0"]["health_lost_since_previous_decision"] = 40
+        retreat_state["objective"], retreat_state["map"] = "win", "8m"
+        engage_state = scene(n_allies=4, n_enemies=3, enemy_health=30)  # No damage either.
+        engage_state["objective"], engage_state["map"] = "win", "8m"
+        for cycle in (1, 2):
+            for state in (retreat_state, engage_state):
+                state["episode"], state["game_loop"] = 1, 80 + cycle * 16
+                state["steps_remaining"] = 50
+                manager.step({"model": "m", "state": state}, 4)
+        self.assertGreaterEqual(manager.unit_states["u0"]["retreat_cycles"], 2)
+
+    def test_enemy_leaving_fog_is_not_damage_or_stall(self):
+        manager = SkillManager(4)
+        manager.select(ADAPTIVE_FOCUS_FIRE)
+        self.step_state(manager)  # Baseline with 3 visible enemies.
+        stall_before = manager.stall_steps
+        contacted = manager.contacted
+        self.step_state(manager, visible_drop=True)  # e2 enters the fog: HP sum drops.
+        # Fog transitions must not be read as damage progress (stall unchanged
+        # or growing, contact state untouched, no crash from missing overlap).
+        self.assertGreaterEqual(manager.stall_steps, stall_before)
+        self.assertEqual(manager.contacted, contacted)
+
+    def test_new_skill_window_keeps_retreat_history(self):
+        manager = SkillManager(2)
+        manager.select(ADAPTIVE_FOCUS_FIRE)
+        state = scene(n_allies=4, n_enemies=3, enemy_health=30, wounded={0: 5}, cooldown=(0,))
+        state["allies"]["u0"]["health_lost_since_previous_decision"] = 40
+        state["objective"], state["map"] = "win", "8m"
+        state["episode"], state["game_loop"], state["steps_remaining"] = 1, 80, 50
+        manager.step({"model": "m", "state": state}, 4)
+        manager.step({"model": "m", "state": state}, 4)
+        self.assertEqual(manager.unit_states["u0"]["retreat_steps"], 2)
+        manager.select(ADAPTIVE_FOCUS_FIRE)  # New window.
+        self.assertEqual(manager.unit_states["u0"]["retreat_steps"], 2)
+
+    def test_episode_reset_clears_retreat_cycles(self):
+        manager = SkillManager(4)
+        manager.select(ADAPTIVE_FOCUS_FIRE)
+        self.step_state(manager)
+        manager.unit_states["u0"] = {"role": "attack", "retreat_steps": 2, "retreat_cycles": 2}
+        manager.reset()
+        self.assertEqual(manager.unit_states, {})
+
 
 if __name__ == "__main__":
     unittest.main()

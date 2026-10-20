@@ -276,21 +276,25 @@ class SkillManager:
     def _step_adaptive(self, payload, n_agents):
         """One AdaptiveFocusFire step with persistent per-unit role history."""
         state = payload["state"]
-        # Observable combat progress: visible-enemy total effective health.
-        # Hidden enemies are unknown; no damage inferred from fog.
-        enemy_health = sum(e["health"] + e["shield"] for e in state["visible_enemies"].values())
-        if self._last_enemy_health is not None and state["visible_enemies"]:
-            if enemy_health < self._last_enemy_health - 1e-6:
-                self.stall_steps = 0
-                self.contacted = True  # Observable damage proves contact.
-            elif self.contacted:
-                self.stall_steps += 1
+        # Observable combat progress, fog-safe: compare per-enemy health only
+        # over enemies visible in BOTH steps, so an enemy entering or leaving
+        # the fog is never misread as damage dealt or undone.
+        current_health = {enemy_id: e["health"] + e["shield"]
+                          for enemy_id, e in state["visible_enemies"].items()}
+        overlap = set(current_health) & set(self._last_enemy_health or {})
+        damage_observed = any(current_health[e] < self._last_enemy_health[e] - 1e-6
+                              for e in overlap)
+        if damage_observed:
+            self.stall_steps = 0
+            self.contacted = True  # Observable damage proves contact.
+        elif self.contacted and state["visible_enemies"] and overlap:
+            self.stall_steps += 1
         if not self.contacted and state["visible_enemies"] and any(
                 relation.get("smac_attack_available")
                 for row in state.get("relations", {}).values()
                 for relation in row.values()):
             self.contacted = True  # Visible enemy plus a legal attack edge = engagement.
-        self._last_enemy_health = enemy_health if state["visible_enemies"] else None
+        self._last_enemy_health = current_health
 
         result = allocate_adaptive_focus_fire(
             state, n_agents, unit_states=self.unit_states, all_in=self.all_in,
@@ -320,17 +324,26 @@ class SkillManager:
         if isinstance(result.get("estimated_overkill"), dict):
             self.stats["estimated_overkill"] += sum(result["estimated_overkill"].values())
 
-        # Per-unit role history: retreat caps, cycles and re-engagement bookkeeping.
+        # Per-unit role history. A retreat episode only counts toward the
+        # unproductive-cycle tally when the unit's intervening attack stint
+        # produced no observable enemy damage: normal dodge -> re-engage ->
+        # damage cycles are free, repeated fruitless retreats are not.
         for actor, role in result["roles"].items():
             unit_state = self.unit_states.setdefault(
                 actor, {"role": "attack", "retreat_steps": 0, "retreat_cycles": 0})
             if role == "retreat":
-                unit_state["retreat_steps"] += 1
-            else:
-                if unit_state["role"] == "retreat":
-                    if unit_state["retreat_steps"] > 0:
+                if unit_state.get("role") != "retreat":
+                    if not unit_state.pop("progress_since_retreat", False):
                         unit_state["retreat_cycles"] += 1
+                    unit_state["retreat_steps"] = 1
+                else:
+                    unit_state["retreat_steps"] += 1
+            else:
+                if unit_state.get("role") == "retreat":
                     unit_state["retreat_steps"] = 0
+                    unit_state["progress_since_retreat"] = False
+                if damage_observed and role in ("attack", "all_in_attack"):
+                    unit_state["progress_since_retreat"] = True
             unit_state["role"] = role
         self.unit_states = {a: v for a, v in self.unit_states.items()
                             if a in state["allies"] and state["allies"][a]["alive"]}

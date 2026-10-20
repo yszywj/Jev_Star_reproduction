@@ -32,8 +32,10 @@ from .focus_fire import allocate_focus_fire, expected_damage, fallback_action
 PARAMS = {
     "max_retreat_steps": 2,       # per unit, per retreat episode
     "stall_steps": 6,             # contact made + no observable enemy damage this long -> reassess
-    "all_in_team_ratio": 0.35,    # team effective-health ratio seen as severe disadvantage
-    "max_retreat_cycles": 4,      # total retreat episodes tolerated before calling it a loop
+    "all_in_team_ratio": 0.35,    # remaining-force ratio seen as severe disadvantage
+    "max_retreat_cycles": 3,      # per unit: unproductive retreat episodes before calling it a loop
+    "disable_retreat": False,     # ablation: no local retreats at all
+    "disable_all_in": False,      # ablation: never enter All-in
 }
 
 # Postures only tune the explainable thresholds; one template, three configs.
@@ -82,9 +84,19 @@ def evaluate_retreat_value(state, actor, retreat_move, unit_state, posture="bala
     - A unit on cooldown / out of range retreats only when a safe legal move
       exists, the retreat cap is not exhausted, and re-engagement is possible
       (it still has some legal attack relation to come back to).
+
+    The per-unit retreat cap applies to EVERY retreat-returning branch —
+    including the critical-unit branch. There is deliberately no emergency
+    exception: a capped unit stays in the fire plan (or repositions via the
+    normal attack path) instead of retreating forever.
     """
+    params = {**PARAMS, **(parameters or {})}
     posture_params = POSTURE_PARAMS[posture]
     unit = state["allies"][actor]
+    if unit_state.get("retreat_steps", 0) >= params["max_retreat_steps"]:
+        if _has_kill_opportunity(state, actor):
+            return False, "kill_opportunity"
+        return False, "retreat_cap_reached"
     if _has_kill_opportunity(state, actor):
         return False, "kill_opportunity"
     can_attack_now = (unit["weapon_ready"]
@@ -101,8 +113,6 @@ def evaluate_retreat_value(state, actor, retreat_move, unit_state, posture="bala
         return False, "weapon_engaged"
     if retreat_move is None:
         return False, "no_safe_move"
-    if unit_state.get("retreat_steps", 0) >= PARAMS["max_retreat_steps"]:
-        return False, "retreat_cap_reached"
     if not _legal_attack_targets(state, actor):
         return False, "cannot_reengage"
     return True, "cooldown_or_out_of_range"
@@ -110,29 +120,47 @@ def evaluate_retreat_value(state, actor, retreat_move, unit_state, posture="bala
 
 def should_enter_all_in(state, stall, contacted, unit_states, heal_capacity,
                         parameters=None):
-    """Sticky All-in trigger. Returns (enter, reasons)."""
+    """Sticky All-in trigger. Returns (enter, reasons).
+
+    Normal short retreats (threat -> brief move -> re-engage -> damage) are
+    NOT penalized: ``retreat_cycles`` counts only a single unit's
+    *unproductive* retreat episodes (retreating again without any observable
+    enemy damage in between), maintained by the SkillManager. Two separate
+    survival metrics are reported and never conflated:
+
+    - ``alive_ratio``: average health state of currently living units.
+    - ``remaining_force_ratio``: surviving effective health relative to the
+      full roster's maximum (8 full-HP marines down to 1 -> 0.125 even
+      though that survivor is at 100%).
+
+    A stall alone never triggers (a healthy team may legitimately kite); it
+    must combine with a real disadvantage, or one unit must be stuck in a
+    genuinely unproductive retreat loop.
+    """
     params = {**PARAMS, **(parameters or {})}
     if not contacted or not state["visible_enemies"]:
         return False, None  # Never mis-trigger before contact / with no visible enemy.
     alive = [u for u in state["allies"].values() if u["alive"]]
     if not alive:
         return False, None
-    maximum = sum((u["max_health"] or 0) + (u["max_shield"] or 0) for u in alive) or 1
-    ratio = sum(u["health"] + u["shield"] for u in alive) / maximum
-    cycles = sum(u.get("retreat_cycles", 0) for u in unit_states.values())
+    alive_max = sum((u["max_health"] or 0) + (u["max_shield"] or 0) for u in alive) or 1
+    alive_ratio = sum(u["health"] + u["shield"] for u in alive) / alive_max
+    roster_max = sum((u["max_health"] or 0) + (u["max_shield"] or 0)
+                     for u in state["allies"].values()) or 1
+    remaining_force_ratio = sum(u["health"] + u["shield"] for u in alive) / roster_max
+    worst_cycles = max((u.get("retreat_cycles", 0) for u in unit_states.values()),
+                       default=0)
     reasons = []
     if stall >= params["stall_steps"]:
         reasons.append("no_damage_progress")
-    if ratio < params["all_in_team_ratio"] and not heal_capacity:
-        reasons.append("low_survival_no_heal")
-    if cycles >= params["max_retreat_cycles"]:
-        reasons.append("retreat_loop")
-    # A stall alone never triggers: a healthy team kiting on cooldown must not
-    # All-in. Retreat loops are decisive on their own; otherwise the no-progress
-    # signal must be combined with a real disadvantage.
-    if "retreat_loop" in reasons:
+    if remaining_force_ratio < params["all_in_team_ratio"] and not heal_capacity:
+        reasons.append(f"low_remaining_force({remaining_force_ratio:.2f};"
+                       f"alive_ratio={alive_ratio:.2f})_no_heal")
+    if worst_cycles >= params["max_retreat_cycles"]:
+        reasons.append(f"unproductive_retreat_loop(unit_cycles={worst_cycles})")
+    if any(r.startswith("unproductive_retreat_loop") for r in reasons):
         return True, ";".join(reasons)
-    if "no_damage_progress" in reasons and len(reasons) > 1:
+    if reasons and "no_damage_progress" in reasons and len(reasons) > 1:
         return True, ";".join(reasons)
     return False, None
 
@@ -151,19 +179,26 @@ def allocate_adaptive_focus_fire(state, n_agents, unit_states=None, all_in=False
     allies = state["allies"]
 
     heal_capacity = any(candidates for candidates in state.get("heal_candidates", {}).values())
-    if all_in:
+    if all_in and not params["disable_all_in"]:
         all_in_now, all_in_reason = True, "sticky"
+    elif params["disable_all_in"]:
+        all_in_now, all_in_reason = False, None  # Ablation: never All-in, no back door.
     else:
         all_in_now, all_in_reason = should_enter_all_in(state, stall, contacted,
                                                         unit_states, heal_capacity, params)
 
     retreat_units, retreat_actions, retreat_reasons = {}, {}, {}
-    if not all_in_now:
-        endangered = detect_retreat_candidates(state)
+    if not all_in_now and not params["disable_retreat"]:
+        # Danger thresholds follow the same risk_threshold CLI knob as
+        # CoverRetreat when the caller supplies one.
+        cover_parameters = ({k: params[k]} if "risk_threshold" in params else None)
+        endangered = detect_retreat_candidates(state, cover_parameters)
         for actor in sorted(endangered, key=lambda a: int(a[1:])):
-            move, move_reason, _ = select_retreat_action(state, actor, {actor})
+            move, move_reason, _ = select_retreat_action(
+                state, actor, {actor}, cover_parameters)
             value, reason = evaluate_retreat_value(
-                state, actor, move, unit_states.get(actor, DEFAULT_UNIT_STATE), posture, params)
+                state, actor, move, unit_states.get(actor, DEFAULT_UNIT_STATE),
+                posture, params)
             if value:
                 retreat_units[actor] = True
                 retreat_actions[actor] = move

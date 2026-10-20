@@ -111,7 +111,11 @@ class JevMicroEnv(StarCraft2Env):
         It only changes the visible camera position in the SC2 windows.
         """
 
-        if not self._controllers:
+        # Visualization only: mock/test environments may not have SC2
+        # controllers at all; the camera must no-op there instead of
+        # raising, and must never affect actions, rewards or timing.
+        controllers = getattr(self, "_controllers", None)
+        if not controllers:
             return
 
         # All currently alive units on both teams.

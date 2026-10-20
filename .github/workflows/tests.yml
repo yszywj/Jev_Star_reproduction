@@ -4,6 +4,9 @@ jobs:
   regression:
     runs-on: windows-latest
     strategy:
+      # A micro failure must not cancel the macro run: both components keep
+      # their full status and artifacts.
+      fail-fast: false
       matrix:
         component: [macro, micro]
     steps:
@@ -14,8 +17,61 @@ jobs:
           cache: pip
           cache-dependency-path: '${{ matrix.component }}/requirements.txt'
       - run: python -m pip install -r '${{ matrix.component }}/requirements.txt'
-      - run: python -B -m unittest discover -s tests -p 'test_jev*.py'
+      - name: Run offline regression and record report
+        shell: pwsh
         working-directory: '${{ matrix.component }}'
         env:
           PYTHONUTF8: '1'
           PYTHONDONTWRITEBYTECODE: '1'
+        run: |
+          # Same test command as before; a failing run keeps its non-zero
+          # exit code (re-raised at the end) so the GitHub Check stays red.
+          # summary.json is derived from the actual output only - nothing is
+          # hand-filled. The log contains unittest output only, no secrets.
+          $ErrorActionPreference = 'Continue'
+          New-Item -ItemType Directory -Force ci-results | Out-Null
+          $command = "python -B -m unittest discover -s tests -p 'test_jev*.py'"
+          $sw = [System.Diagnostics.Stopwatch]::StartNew()
+          python -B -m unittest discover -s tests -p 'test_jev*.py' 2>&1 | Tee-Object -FilePath ci-results/unittest.log
+          $exit = $LASTEXITCODE
+          $sw.Stop()
+          $log = Get-Content ci-results/unittest.log
+          $total = 0
+          if ($log -match '^Ran (\d+) tests?') { $total = [int]$Matches[1] }
+          $failures = 0; $errors = 0; $skipped = 0
+          foreach ($line in $log) {
+            if ($line -match 'failures=(\d+)') { $failures = [int]$Matches[1] }
+            if ($line -match 'errors=(\d+)') { $errors = [int]$Matches[1] }
+            if ($line -match 'skipped=(\d+)') { $skipped = [int]$Matches[1] }
+          }
+          if ($log -match '^OK.*skipped=(\d+)') { $skipped = [int]$Matches[1] }
+          $status = if ($exit -eq 0) { 'passed' } else { 'failed' }
+          $passed = $total - $failures - $errors - $skipped
+          if ($passed -lt 0) { $passed = 0 }
+          $failing = @($log | Where-Object { $_ -match '^(FAIL|ERROR): ' } | ForEach-Object { $_.Trim() })
+          [ordered]@{
+            component = '${{ matrix.component }}'
+            commit_sha = '${{ github.sha }}'
+            python_version = (python --version 2>&1).ToString()
+            command = $command
+            duration_seconds = [math]::Round($sw.Elapsed.TotalSeconds, 2)
+            total = $total
+            passed = $passed
+            failures = $failures
+            errors = $errors
+            skipped = $skipped
+            status = $status
+            failing_tests = $failing
+            run_id = '${{ github.run_id }}'
+            source = 'github-actions'
+          } | ConvertTo-Json | Set-Content -Encoding utf8 ci-results/summary.json
+          Get-Content ci-results/summary.json
+          if ($exit -ne 0) { exit $exit }
+      - name: Upload test artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: offline-tests-${{ matrix.component }}-${{ github.run_id }}
+          path: ${{ matrix.component }}/ci-results/
+          if-no-files-found: warn
+          retention-days: 30
