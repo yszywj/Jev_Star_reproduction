@@ -191,7 +191,11 @@ def allocate_adaptive_focus_fire(state, n_agents, unit_states=None, all_in=False
     if not all_in_now and not params["disable_retreat"]:
         # Danger thresholds follow the same risk_threshold CLI knob as
         # CoverRetreat when the caller supplies one.
-        cover_parameters = ({k: params[k]} if "risk_threshold" in params else None)
+        cover_parameters = (
+            {"risk_threshold": params["risk_threshold"]}
+            if "risk_threshold" in params
+            else None
+        )
         endangered = detect_retreat_candidates(state, cover_parameters)
         for actor in sorted(endangered, key=lambda a: int(a[1:])):
             move, move_reason, _ = select_retreat_action(
