@@ -71,6 +71,15 @@ py -3.10 jev_star.py micro --map MMM --policy nearest --planner none --skill-mod
 py -3.10 jev_star.py micro --map MMM --policy jev --planner none --skill-mode jev --skill-max-steps 4 --episodes 3 --output-dir jev_runs\heal-assign-jev
 ```
 
+### AdaptiveFocusFire skill
+
+`--skill-name adaptive_focus_fire` (with `--skill-mode always`) or the appended JEV posture candidates (`adaptive_focus_fire (aggressive|balanced|defensive)`) activate the composed skill. Every step, ALL fighting units — including when nobody retreats — go through FocusFireBudget on the attacker subset (never per-unit nearest fallback); only units with clear retreat value briefly retreat via CoverRetreat's detection and move scoring (max `--adaptive-max-retreat-steps`, default 2, per unit, tracked in per-unit history that survives 4-step skill windows). Kill-capable and weapon-engaged units keep attacking; cooled-down endangered units with a safe move may dodge and then re-engage. When contact has been made and there has been no observable enemy damage for `--adaptive-stall-steps` (default 6) steps combined with a real disadvantage (low team survival without heal capacity, or a retreat loop), the controller enters a sticky All-in: survival retreats stop, everyone rejoins the fire plan, and legal approach moves remain available. Postures only retune explainable thresholds (critical ratio, recent-loss bar) in one shared template. Events: `adaptive_skill_started/step`, `adaptive_roles_updated`, `adaptive_retreat_started/ended`, `adaptive_reengaged`, `adaptive_all_in_started`, `adaptive_skill_terminated`; summary adds engage/retreat/All-in step counts, retreat unit steps, re-engagements and All-in triggers. Predicted damage remains prediction, never actual damage.
+
+```powershell
+# Free 8m comparison against test-8m-focus / test-8m-cover
+py -3.10 jev_star.py micro --map 8m --policy nearest --planner none --skill-mode always --skill-name adaptive_focus_fire --adaptive-posture balanced --episodes 1 --seed 1 --step-mul 8 --output-dir jev_runs\test-8m-adaptive
+```
+
 ### CoverRetreat skill
 
 `--skill-name cover_retreat` (with `--skill-mode always`) or JEV choice `2` (with `--skill-mode jev`) activates CoverRetreat. Endangered allies — visible threat present AND effective survival ratio below `--cover-risk-threshold` (0.35) or a large recent loss — retreat along the best-scoring legal move (max distance from visible enemies, avoid other enemies' danger radius, prefer allied support, keep the previous direction); remaining allies with legal attacks cover them by delegating to FocusFireBudget restricted to cover-role units, so retreating units never contribute to the same step's damage budget. If everyone is endangered the whole team retreats; no unit is sacrificed as a forced cover. Exit uses hysteresis: the skill ends after `--cover-safe-streak` (2) consecutive threat-free steps rather than the moment health looks low, preventing retreat/attack oscillation. Thresholds live in one `PARAMS` dict in `skills/cover_retreat.py` and are CLI-configurable. Cover attacks are never assumed to redirect enemy targeting; Medivacs are never assigned attacks but do flee when threatened. Events: `cover_retreat_selected/started/step`, `cover_roles_updated`, `retreat_direction_selected`, `cover_retreat_terminated`; per-episode and summary `skill` stats add role reassignments, retreat unit steps and safe-streak exits.
@@ -116,6 +125,7 @@ See [experiments](../docs/experiments.md) for results and the [main README](../R
 | [skills/focus_fire.py](jev_micro/skills/focus_fire.py) | FocusFireBudget 集火伤害预算分配器 |
 | [skills/cover_retreat.py](jev_micro/skills/cover_retreat.py) | CoverRetreat 危险识别、撤退方向与掩护分配 |
 | [skills/heal_assign.py](jev_micro/skills/heal_assign.py) | HealAssign 多治疗者联合分配与持续治疗 |
+| [skills/adaptive_focus_fire.py](jev_micro/skills/adaptive_focus_fire.py) | AdaptiveFocusFire 组合式自适应集火 |
 | [skill_policy.py](jev_micro/skill_policy.py) | JEV 小队级技能选择问题与解码 |
 | [skill_manager.py](jev_micro/skill_manager.py) | 技能生命周期、多步执行与终止 |
 

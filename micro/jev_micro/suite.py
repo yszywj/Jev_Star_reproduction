@@ -102,8 +102,13 @@ def main():
     parser.add_argument("--api-retries", type=int, default=2)
     parser.add_argument("--skill-mode", choices=["off", "always", "jev"], default="off")
     parser.add_argument("--skill-max-steps", type=int, default=4)
-    parser.add_argument("--skill-name", choices=["focus_fire_budget", "cover_retreat", "heal_assign"],
+    parser.add_argument("--skill-name", choices=["focus_fire_budget", "cover_retreat",
+                                                 "heal_assign", "adaptive_focus_fire"],
                         default="focus_fire_budget")
+    parser.add_argument("--adaptive-posture", choices=["aggressive", "balanced", "defensive"],
+                        default="balanced")
+    parser.add_argument("--adaptive-max-retreat-steps", type=int, default=2)
+    parser.add_argument("--adaptive-stall-steps", type=int, default=6)
     parser.add_argument("--heal-switch-margin", type=float, default=0.15)
     parser.add_argument("--cover-risk-threshold", type=float, default=0.35)
     parser.add_argument("--cover-safe-streak", type=int, default=2)
@@ -134,7 +139,8 @@ def main():
         previous = json.loads(suite_file.read_text(encoding="utf-8"))
         for key in ("maps", "policies", "episodes", "seed", "step_mul", "model", "opponent",
                     "skill_mode", "skill_max_steps", "skill_name",
-                    "cover_risk_threshold", "cover_safe_streak", "heal_switch_margin"):
+                    "cover_risk_threshold", "cover_safe_streak", "heal_switch_margin",
+                    "adaptive_posture", "adaptive_max_retreat_steps", "adaptive_stall_steps"):
             if previous.get(key) != settings.get(key):
                 parser.error(f"Resume settings differ: {key}")
         if previous.get("planner", "none") != settings["planner"]:
@@ -184,7 +190,10 @@ def main():
                        "--skill-name", args.skill_name,
                        "--cover-risk-threshold", str(args.cover_risk_threshold),
                        "--cover-safe-streak", str(args.cover_safe_streak),
-                       "--heal-switch-margin", str(args.heal_switch_margin)]
+                       "--heal-switch-margin", str(args.heal_switch_margin),
+                       "--adaptive-posture", args.adaptive_posture,
+                       "--adaptive-max-retreat-steps", str(args.adaptive_max_retreat_steps),
+                       "--adaptive-stall-steps", str(args.adaptive_stall_steps)]
             if args.planner == "codex" and policy == "jev":
                 command.extend(["--planner", "codex", "--planner-model", args.planner_model,
                                 "--planner-effort", args.planner_effort,

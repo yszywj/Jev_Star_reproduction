@@ -1,9 +1,12 @@
 """Skill lifecycle: activation, multi-step execution, termination, telemetry."""
 
-from .skill_policy import DIRECT_CONTROL, FOCUS_FIRE_BUDGET, COVER_RETREAT, HEAL_ASSIGN
+from .skill_policy import (ADAPTIVE_FOCUS_FIRE, COVER_RETREAT, DIRECT_CONTROL,
+                           FOCUS_FIRE_BUDGET, HEAL_ASSIGN)
 from .skills.focus_fire import allocate_focus_fire
 from .skills.cover_retreat import allocate_cover_retreat, PARAMS as COVER_PARAMS
 from .skills.heal_assign import assign_healing, PARAMS as HEAL_PARAMS
+from .skills.adaptive_focus_fire import (PARAMS as ADAPTIVE_PARAMS,
+                                         allocate_adaptive_focus_fire)
 
 
 class SkillManager:
@@ -14,7 +17,7 @@ class SkillManager:
     """
 
     def __init__(self, max_steps=4, risk_threshold=None, safe_streak_required=2,
-                 heal_switch_margin=None):
+                 heal_switch_margin=None, adaptive_params=None):
         self.max_steps = max_steps
         self.safe_streak_required = max(1, safe_streak_required)
         self.cover_params = dict(COVER_PARAMS)
@@ -23,13 +26,19 @@ class SkillManager:
         self.heal_params = dict(HEAL_PARAMS)
         if heal_switch_margin is not None:
             self.heal_params["switch_margin"] = heal_switch_margin
+        self.adaptive_params = dict(ADAPTIVE_PARAMS)
+        if adaptive_params:
+            self.adaptive_params.update(adaptive_params)
         self.stats = {"activations": 0, "steps": 0, "terminations": {},
                       "reassignments": 0, "estimated_overkill": 0.0,
                       "predicted_damage": 0.0, "selections": {},
                       "fallback_steps": 0, "role_reassignments": 0,
                       "safe_streak_exits": 0, "retreat_unit_steps": 0,
                       "heal_assignments_created": 0, "heal_target_switches": 0,
-                      "heal_self_preserves": 0, "heal_no_target_steps": 0}
+                      "heal_self_preserves": 0, "heal_no_target_steps": 0,
+                      "adaptive_engage_steps": 0, "adaptive_retreat_steps": 0,
+                      "adaptive_all_in_steps": 0, "adaptive_retreat_unit_steps": 0,
+                      "adaptive_reengagements": 0, "adaptive_all_in_triggers": 0}
         self.reset()
 
     def reset(self):
@@ -48,15 +57,27 @@ class SkillManager:
         self.retreat_direction = None
         self.safe_streak = 0
         self._pending_damage = {}
+        # AdaptiveFocusFire episode-scoped history: survives 4-step skill
+        # windows so re-activation cannot reset retreat caps or All-in.
+        self.posture = "balanced"
+        self.unit_states = {}
+        self.all_in = False
+        self.all_in_reason = None
+        self.stall_steps = 0
+        self.contacted = False
+        self._last_enemy_health = None
 
     # -- selection -------------------------------------------------------
 
-    def select(self, skill, priority_target=None):
+    def select(self, skill, priority_target=None, posture=None):
         """JEV (or --skill-mode always) chose a mode; hold it for one window."""
-        if skill not in (DIRECT_CONTROL, FOCUS_FIRE_BUDGET, COVER_RETREAT, HEAL_ASSIGN):
+        if skill not in (DIRECT_CONTROL, FOCUS_FIRE_BUDGET, COVER_RETREAT,
+                         HEAL_ASSIGN, ADAPTIVE_FOCUS_FIRE):
             raise ValueError(f"Unknown skill: {skill}")
         self.current_skill = skill
         self.priority_target = priority_target
+        if posture:
+            self.posture = posture
         self.mode_remaining = self.max_steps
         self.stats["selections"][skill] = self.stats["selections"].get(skill, 0) + 1
         if skill != DIRECT_CONTROL:
@@ -77,7 +98,8 @@ class SkillManager:
 
     @property
     def active(self):
-        return (self.current_skill in (FOCUS_FIRE_BUDGET, COVER_RETREAT, HEAL_ASSIGN)
+        return (self.current_skill in (FOCUS_FIRE_BUDGET, COVER_RETREAT,
+                                       HEAL_ASSIGN, ADAPTIVE_FOCUS_FIRE)
                 and self.termination_reason is None)
 
     # -- execution -------------------------------------------------------
@@ -92,6 +114,8 @@ class SkillManager:
             return self._step_cover_retreat(payload, n_agents)
         if self.current_skill == HEAL_ASSIGN:
             return self._step_heal_assign(payload, n_agents)
+        if self.current_skill == ADAPTIVE_FOCUS_FIRE:
+            return self._step_adaptive(payload, n_agents)
         return self._step_focus_fire(payload, n_agents)
 
     def _step_focus_fire(self, payload, n_agents):
@@ -249,8 +273,102 @@ class SkillManager:
             telemetry["termination_reason"] = self.termination_reason
         return partial, telemetry
 
+    def _step_adaptive(self, payload, n_agents):
+        """One AdaptiveFocusFire step with persistent per-unit role history."""
+        state = payload["state"]
+        # Observable combat progress: visible-enemy total effective health.
+        # Hidden enemies are unknown; no damage inferred from fog.
+        enemy_health = sum(e["health"] + e["shield"] for e in state["visible_enemies"].values())
+        if self._last_enemy_health is not None and state["visible_enemies"]:
+            if enemy_health < self._last_enemy_health - 1e-6:
+                self.stall_steps = 0
+                self.contacted = True  # Observable damage proves contact.
+            elif self.contacted:
+                self.stall_steps += 1
+        if not self.contacted and state["visible_enemies"] and any(
+                relation.get("smac_attack_available")
+                for row in state.get("relations", {}).values()
+                for relation in row.values()):
+            self.contacted = True  # Visible enemy plus a legal attack edge = engagement.
+        self._last_enemy_health = enemy_health if state["visible_enemies"] else None
+
+        result = allocate_adaptive_focus_fire(
+            state, n_agents, unit_states=self.unit_states, all_in=self.all_in,
+            stall=self.stall_steps, contacted=self.contacted, posture=self.posture,
+            parameters=self.adaptive_params,
+            previous_attack_assignments=self.target_assignments or None)
+        all_in_started_now = result["all_in"] and not self.all_in
+        previous_roles = {a: v.get("role") for a, v in self.unit_states.items()}
+        retreat_ended = sorted((a for a, role in result["roles"].items()
+                                if role != "retreat" and previous_roles.get(a) == "retreat"),
+                               key=lambda a: int(a[1:]))
+        self.last_observation_step = state["game_loop"]
+        self.skill_start_step = self.skill_start_step if self.skill_start_step is not None \
+            else state["game_loop"]
+        self.elapsed_steps += 1
+        self.stats["steps"] += 1
+        if result["all_in"] and not self.all_in:
+            self.stats["adaptive_all_in_triggers"] += 1
+        self.all_in, self.all_in_reason = result["all_in"], result["all_in_reason"]
+        self.stats["adaptive_all_in_steps" if self.all_in else
+                   ("adaptive_retreat_steps" if result["retreat_units"]
+                    else "adaptive_engage_steps")] += 1
+        self.stats["adaptive_retreat_unit_steps"] += len(result["retreat_units"])
+        self.stats["adaptive_reengagements"] += len(result["reengaged"])
+        if isinstance(result.get("predicted_damage"), dict):
+            self.stats["predicted_damage"] += sum(result["predicted_damage"].values())
+        if isinstance(result.get("estimated_overkill"), dict):
+            self.stats["estimated_overkill"] += sum(result["estimated_overkill"].values())
+
+        # Per-unit role history: retreat caps, cycles and re-engagement bookkeeping.
+        for actor, role in result["roles"].items():
+            unit_state = self.unit_states.setdefault(
+                actor, {"role": "attack", "retreat_steps": 0, "retreat_cycles": 0})
+            if role == "retreat":
+                unit_state["retreat_steps"] += 1
+            else:
+                if unit_state["role"] == "retreat":
+                    if unit_state["retreat_steps"] > 0:
+                        unit_state["retreat_cycles"] += 1
+                    unit_state["retreat_steps"] = 0
+            unit_state["role"] = role
+        self.unit_states = {a: v for a, v in self.unit_states.items()
+                            if a in state["allies"] and state["allies"][a]["alive"]}
+        self.target_assignments = result["attack_assignments"]
+
+        telemetry = {"skill": "adaptive_focus_fire", "skill_step": self.elapsed_steps,
+                     "skill_start_step": self.skill_start_step,
+                     "posture": self.posture, "phase": result["phase"],
+                     "all_in": self.all_in, "all_in_reason": self.all_in_reason,
+                     "attack_units": result["attack_units"],
+                     "retreat_units": result["retreat_units"],
+                     "support_units": result["support_units"],
+                     "roles": result["roles"],
+                     "retreat_reasons": result["retreat_reasons"],
+                     "retreat_actions": result["retreat_actions"],
+                     "reengaged": result["reengaged"],
+                     "attack_assignments": result["attack_assignments"],
+                     "predicted_damage": result["predicted_damage"],
+                     "estimated_overkill": result["estimated_overkill"],
+                     "stall_steps": self.stall_steps,
+                     "all_in_started_now": result["all_in_reason"] if all_in_started_now else None,
+                     "retreat_ended": retreat_ended,
+                     "retreat_state": {a: dict(self.unit_states.get(a, {}))
+                                       for a in result["retreat_units"]}}
+        if result["terminated"]:
+            self._terminate(result["termination_reason"])
+        elif self.elapsed_steps >= self.max_steps:
+            self._terminate("max_steps")
+        if self.termination_reason is not None:
+            telemetry["termination_reason"] = self.termination_reason
+        return result["actions"], telemetry
+
     def _terminate(self, reason):
         self.termination_reason = reason
+        # A genuinely terminated skill must hand control back at the next
+        # decision boundary instead of keeping a stale mode window.
+        if self.current_skill != DIRECT_CONTROL:
+            self.mode_remaining = 0
         self.stats["terminations"][reason] = self.stats["terminations"].get(reason, 0) + 1
 
     def spend_mode_step(self):

@@ -41,8 +41,9 @@ class SkillPolicyTests(unittest.TestCase):
     def test_request_is_one_team_question_without_unit_decoding(self):
         request = skill_request(payload(), "jev-1.13.0", 4)
         self.assertEqual(list(request["questions"]), ["team_skill"])
-        # Dynamic binding: 0/1/2 fixed modes plus one explicit candidate per visible enemy.
-        self.assertEqual(set(request["questions"]["team_skill"]["criteria"]), {"0", "1", "2", "3", "4"})
+        # Dynamic binding: 0/1/2 fixed modes, explicit targets, adaptive postures appended.
+        self.assertEqual(set(request["questions"]["team_skill"]["criteria"]),
+                         {"0", "1", "2", "3", "4", "5", "6", "7"})
         self.assertNotIn("questions", request["state"])
         # Only shared team-visible data: no raw hidden state, no per-unit criteria.
         body = json.dumps(request)
@@ -72,11 +73,12 @@ class SkillPolicyTests(unittest.TestCase):
                                       for a in many["state"]["allies"]}
         request = skill_request(many, "jev-1.13.0", 4)
         criteria = request["questions"]["team_skill"]["criteria"]
-        self.assertEqual(sorted(criteria, key=int), ["0", "1", "2", "3", "4", "5", "6"])
+        self.assertEqual(sorted(criteria, key=int),
+                         ["0", "1", "2", "3", "4", "5", "6", "7", "8", "9"])  # + adaptive postures.
         self.assertEqual(decode_skill(request, choice_answer("6")), (FOCUS_FIRE_BUDGET, "e3"))
         # A choice beyond the dynamically bound set is illegal even if numeric.
         with self.assertRaises(ValueError):
-            decode_skill(request, choice_answer("7"))
+            decode_skill(request, choice_answer("10"))
 
     def test_team_answer_is_never_routed_through_unit_decoding(self):
         from jev_micro.policy import decode_actions

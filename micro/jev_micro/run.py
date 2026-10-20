@@ -21,7 +21,8 @@ from .planner import MapPlanner, HIERARCHY_SCHEMA_VERSION, attach_plan, add_plan
 from .feedback import action_feedback
 from .scenario import BRIEF_VERSION, build_scenario_brief
 from .skill_manager import SkillManager
-from .skill_policy import COVER_RETREAT, FOCUS_FIRE_BUDGET, HEAL_ASSIGN, decode_skill, skill_request
+from .skill_policy import (ADAPTIVE_FOCUS_FIRE, COVER_RETREAT, FOCUS_FIRE_BUDGET,
+                           HEAL_ASSIGN, decode_skill, skill_request)
 
 
 REPO = Path(__file__).resolve().parents[1]
@@ -104,7 +105,7 @@ async def run(args, api_key):
     source_files = ("jev_micro/client.py", "jev_micro/policy.py", "jev_micro/run.py", "jev_micro/planner.py",
                     "jev_micro/catalog.py", "jev_micro/environment.py", "jev_micro/scenario.py", "jev_micro/feedback.py",
                     "jev_micro/skills/focus_fire.py", "jev_micro/skills/cover_retreat.py",
-                    "jev_micro/skills/heal_assign.py",
+                    "jev_micro/skills/heal_assign.py", "jev_micro/skills/adaptive_focus_fire.py",
                     "jev_micro/skill_policy.py", "jev_micro/skill_manager.py",
                     "smac_hard/env/starcraft2/starcraft2.py", "pysc2/lib/remote_controller.py")
     settings["source_sha256"] = {p: hashlib.sha256((REPO / p).read_bytes()).hexdigest() for p in source_files}
@@ -127,7 +128,9 @@ async def run(args, api_key):
     client = JevClient(api_key, args.request_timeout) if args.policy == "jev" else None
     skill_manager = SkillManager(args.skill_max_steps, risk_threshold=args.cover_risk_threshold,
                                  safe_streak_required=args.cover_safe_streak,
-                                 heal_switch_margin=args.heal_switch_margin)
+                                 heal_switch_margin=args.heal_switch_margin,
+                                 adaptive_params={"max_retreat_steps": args.adaptive_max_retreat_steps,
+                                                  "stall_steps": args.adaptive_stall_steps})
     episodes, latencies = [], []
     requests = input_tokens = output_tokens = api_errors = action_errors = 0
     fixed_step_checks = 0
@@ -136,6 +139,41 @@ async def run(args, api_key):
     started = time.monotonic()
     failure = None
     semaphore = asyncio.Semaphore(args.batch_concurrency)
+
+    def emit_adaptive_events(telemetry, episode, step, started=False):
+        """AdaptiveFocusFire-specific events; no-op for other skills."""
+        if telemetry.get("skill") != "adaptive_focus_fire":
+            return
+        if started:
+            emit("adaptive_skill_started", episode=episode, step=step,
+                 posture=telemetry.get("posture"))
+        emit("adaptive_skill_step", episode=episode, step=step,
+             phase=telemetry.get("phase"), posture=telemetry.get("posture"),
+             attack_units=telemetry.get("attack_units"),
+             retreat_units=telemetry.get("retreat_units"),
+             retreat_reasons=telemetry.get("retreat_reasons"),
+             attack_assignments=telemetry.get("attack_assignments"),
+             predicted_damage=telemetry.get("predicted_damage"),
+             estimated_overkill=telemetry.get("estimated_overkill"),
+             stall_steps=telemetry.get("stall_steps"),
+             all_in=telemetry.get("all_in"), skill_step=telemetry.get("skill_step"))
+        emit("adaptive_roles_updated", episode=episode, step=step,
+             roles=telemetry.get("roles"), reengaged=telemetry.get("reengaged"),
+             retreat_state=telemetry.get("retreat_state"))
+        for actor in telemetry.get("retreat_units", []):
+            emit("adaptive_retreat_started", episode=episode, step=step, unit=actor,
+                 reason=(telemetry.get("retreat_reasons") or {}).get(actor))
+        for actor in telemetry.get("reengaged", []):
+            emit("adaptive_reengaged", episode=episode, step=step, unit=actor)
+        if telemetry.get("all_in_started_now"):
+            emit("adaptive_all_in_started", episode=episode, step=step,
+                 reason=telemetry["all_in_started_now"])
+        for actor in telemetry.get("retreat_ended", []):
+            emit("adaptive_retreat_ended", episode=episode, step=step, unit=actor)
+        if "termination_reason" in telemetry:
+            emit("adaptive_skill_terminated", episode=episode, step=step,
+                 reason=telemetry["termination_reason"],
+                 elapsed_steps=telemetry.get("skill_step"))
 
     def emit_heal_events(telemetry, episode, step, started=False, selected=False):
         """HealAssign-specific events; harmless no-op for other skills."""
@@ -290,9 +328,10 @@ async def run(args, api_key):
                     if args.skill_mode == "always":
                         # Free local validation of the allocator; no model calls.
                         always_skill = {"cover_retreat": COVER_RETREAT,
-                                        "heal_assign": HEAL_ASSIGN}.get(args.skill_name, FOCUS_FIRE_BUDGET)
+                                        "heal_assign": HEAL_ASSIGN,
+                                        "adaptive_focus_fire": ADAPTIVE_FOCUS_FIRE}.get(args.skill_name, FOCUS_FIRE_BUDGET)
                         if not skill_manager.active and not heal_unavailable:
-                            skill_manager.select(always_skill)
+                            skill_manager.select(always_skill, posture=args.adaptive_posture)
                             emit("skill_started", episode=episode, step=record["steps"],
                                  skill=always_skill,
                                  activation=skill_manager.stats["activations"])
@@ -321,6 +360,8 @@ async def run(args, api_key):
                             actions, skill_telemetry = skill_manager.step(payload, env.n_agents)
                             emit("skill_step", episode=episode, step=record["steps"], **skill_telemetry)
                             emit_cover_events(skill_telemetry, episode, record["steps"])
+                            emit_adaptive_events(skill_telemetry, episode, record["steps"],
+                                                 started=skill_telemetry.get("skill_step") == 1)
                             if "termination_reason" in skill_telemetry:
                                 emit("skill_terminated", episode=episode, step=record["steps"],
                                      reason=skill_telemetry["termination_reason"],
@@ -332,10 +373,12 @@ async def run(args, api_key):
                                                           last_termination=skill_manager.termination_reason)
                             response = await fetch_batch(skill_payload, episode, record["steps"],
                                                         "team_skill", record)
-                            skill_choice, skill_priority = decode_skill(skill_payload, response["answers"])
-                            skill_manager.select(skill_choice, priority_target=skill_priority)
+                            skill_choice, skill_param = decode_skill(skill_payload, response["answers"])
+                            skill_manager.select(skill_choice, priority_target=skill_param
+                                                 if skill_choice != ADAPTIVE_FOCUS_FIRE else None,
+                                                 posture=skill_param if skill_choice == ADAPTIVE_FOCUS_FIRE else None)
                             emit("skill_selected", episode=episode, step=record["steps"],
-                                 skill=skill_choice, priority_target=skill_priority,
+                                 skill=skill_choice, priority_target=skill_param,
                                  window_steps=args.skill_max_steps)
                             if skill_choice == COVER_RETREAT:
                                 emit("cover_retreat_selected", episode=episode, step=record["steps"])
@@ -372,6 +415,8 @@ async def run(args, api_key):
                             actions, skill_telemetry = skill_manager.step(payload, env.n_agents)
                             emit("skill_step", episode=episode, step=record["steps"], **skill_telemetry)
                             emit_cover_events(skill_telemetry, episode, record["steps"])
+                            emit_adaptive_events(skill_telemetry, episode, record["steps"],
+                                                 started=skill_telemetry.get("skill_step") == 1)
                             if skill_telemetry.get("reassigned"):
                                 emit("skill_reassigned", episode=episode, step=record["steps"],
                                      previous=previous_assignments,
@@ -486,6 +531,12 @@ async def run(args, api_key):
                     "heal_target_switches": stats["heal_target_switches"] - base["heal_target_switches"],
                     "heal_self_preserves": stats["heal_self_preserves"] - base["heal_self_preserves"],
                     "heal_no_target_steps": stats["heal_no_target_steps"] - base["heal_no_target_steps"],
+                    "adaptive_engage_steps": stats["adaptive_engage_steps"] - base["adaptive_engage_steps"],
+                    "adaptive_retreat_steps": stats["adaptive_retreat_steps"] - base["adaptive_retreat_steps"],
+                    "adaptive_all_in_steps": stats["adaptive_all_in_steps"] - base["adaptive_all_in_steps"],
+                    "adaptive_retreat_unit_steps": stats["adaptive_retreat_unit_steps"] - base["adaptive_retreat_unit_steps"],
+                    "adaptive_reengagements": stats["adaptive_reengagements"] - base["adaptive_reengagements"],
+                    "adaptive_all_in_triggers": stats["adaptive_all_in_triggers"] - base["adaptive_all_in_triggers"],
                     "predicted_damage": round(stats["predicted_damage"] - base["predicted_damage"], 2),
                     "estimated_overkill": round(stats["estimated_overkill"] - base["estimated_overkill"], 2),
                     "fallback_steps": stats["fallback_steps"] - base["fallback_steps"],
@@ -533,7 +584,10 @@ async def run(args, api_key):
                               ("jev_selected" if args.skill_mode == "jev" else None),
                           "cover_risk_threshold": args.cover_risk_threshold,
                           "cover_safe_streak": args.cover_safe_streak,
-                          "heal_switch_margin": args.heal_switch_margin},
+                          "heal_switch_margin": args.heal_switch_margin,
+                          "adaptive_posture": args.adaptive_posture,
+                          "adaptive_max_retreat_steps": args.adaptive_max_retreat_steps,
+                          "adaptive_stall_steps": args.adaptive_stall_steps},
                 "latency_median_ms": statistics.median(latencies) if latencies else None,
                 "latency_max_ms": max(latencies) if latencies else None,
                 "wall_seconds": round(time.monotonic() - started, 3), "failure": failure,
@@ -592,9 +646,16 @@ def build_parser():
                         help="off: original per-unit flow; always: local FocusFireBudget without JEV; jev: JEV picks per window")
     parser.add_argument("--skill-max-steps", type=int, default=4,
                         help="Maximum local decision steps per skill activation")
-    parser.add_argument("--skill-name", choices=["focus_fire_budget", "cover_retreat", "heal_assign"],
+    parser.add_argument("--skill-name", choices=["focus_fire_budget", "cover_retreat",
+                                                 "heal_assign", "adaptive_focus_fire"],
                         default="focus_fire_budget",
                         help="Skill used by --skill-mode always (jev mode picks from all skills)")
+    parser.add_argument("--adaptive-posture", choices=["aggressive", "balanced", "defensive"],
+                        default="balanced", help="AdaptiveFocusFire posture preset")
+    parser.add_argument("--adaptive-max-retreat-steps", type=positive_int, default=2,
+                        help="AdaptiveFocusFire: max consecutive retreat steps per unit")
+    parser.add_argument("--adaptive-stall-steps", type=positive_int, default=6,
+                        help="AdaptiveFocusFire: contact-made steps without observable enemy damage before tactical reassessment")
     parser.add_argument("--heal-switch-margin", type=float, default=0.15,
                         help="HealAssign: score bonus for keeping the previous heal target")
     parser.add_argument("--cover-risk-threshold", type=risk_threshold_value, default=0.35,

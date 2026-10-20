@@ -8,6 +8,8 @@ DIRECT_CONTROL = "direct_control"
 FOCUS_FIRE_BUDGET = "focus_fire_budget"
 COVER_RETREAT = "cover_retreat"
 HEAL_ASSIGN = "heal_assign"
+ADAPTIVE_FOCUS_FIRE = "adaptive_focus_fire"
+ADAPTIVE_POSTURES = ("aggressive", "balanced", "defensive")
 
 SKILL_INSTRUCTIONS = (
     "Choose the squad control mode for this StarCraft II micro battle step window. "
@@ -55,6 +57,15 @@ def skill_choices(visible_enemies, healers_present=True, max_explicit_targets=MA
                             "attackers concentrate on it first, then spill to other targets.")
         priorities[choice] = enemy_id
         modes[choice] = FOCUS_FIRE_BUDGET
+    next_id += min(len(visible_enemies), max_explicit_targets)
+    # AdaptiveFocusFire postures appended last: existing ids stay stable.
+    for offset, posture in enumerate(ADAPTIVE_POSTURES):
+        choice = str(next_id + offset)
+        criteria[choice] = (f"adaptive_focus_fire ({posture} posture): focus fire by "
+                            "default, brief retreats only with clear value, All-in when "
+                            "retreating no longer helps.")
+        priorities[choice] = posture  # Carries the posture, not a target ID.
+        modes[choice] = ADAPTIVE_FOCUS_FIRE
     return criteria, priorities, modes
 
 
