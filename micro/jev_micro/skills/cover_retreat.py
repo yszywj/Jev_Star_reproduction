@@ -128,7 +128,7 @@ def select_retreat_action(state, actor, retreat_units, parameters=None, previous
         # target is the closest attack-compatible visible enemy; the mode
         # (tactical vs emergency) is chosen by the caller.
         target_id = min((e for e, r in relations.items()
-                         if r.get("smac_attack_available")),
+                         if r.get("smac_attack_available") or r.get("native_weapon_range") is not None),
                         key=lambda e: (relations[e]["distance"], int(e[1:])), default=None)
         if target_id is not None:
             action, reason, info = scored_select_movement(
@@ -255,7 +255,7 @@ def allocate_cover_retreat(state, n_agents, parameters=None, previous_assignment
         cover_result = allocate_focus_fire(
             cover_state, n_agents, priority_target=priorities[0],
             previous_assignments={a: t for a, t in (previous_assignments or {}).items()
-                                  if a in cover_units})
+                                  if a in cover_units}, parameters=params)
         cover_assignments = cover_result["assignments"]
 
     actions = [0] * n_agents
@@ -299,6 +299,12 @@ def allocate_cover_retreat(state, n_agents, parameters=None, previous_assignment
         "cover_assignments": cover_assignments,
         "cover_budget": (cover_result or {}).get("predicted_damage"),
         "cover_overkill": (cover_result or {}).get("estimated_overkill"),
+        "immediate_damage": (cover_result or {}).get("immediate_damage", {}),
+        "window_only_damage": (cover_result or {}).get("window_only_damage", {}),
+        "window_fire_enabled": bool(params.get("window_fire")),
+        "target_scoring_enabled": bool(params.get("target_scoring")),
+        "range_preserving_move_enabled": bool(params.get("range_preserving_move")),
+        "movement_diagnostics": retreat_telemetry,
         "cover_terminated": (cover_result or {}).get("termination_reason"),
         "stop_fallbacks": stop_fallbacks,
         # Safe means nobody would even ENTER retreat at the full entry

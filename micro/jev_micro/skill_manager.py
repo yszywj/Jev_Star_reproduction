@@ -42,6 +42,9 @@ class SkillManager:
                       "adaptive_engage_steps": 0, "adaptive_retreat_steps": 0,
                       "adaptive_all_in_steps": 0, "adaptive_retreat_unit_steps": 0,
                       "adaptive_reengagements": 0, "adaptive_all_in_triggers": 0}
+        self.stats.update(immediate_damage=0.0, window_only_damage=0.0,
+                          movement_evaluations=0, kept_attack_positions=0,
+                          adaptive_recovery_unit_steps=0)
         self.reset()
 
     def reset(self):
@@ -70,6 +73,7 @@ class SkillManager:
         self.contacted = False
         self._last_enemy_health = None
         self._last_move = {}  # per-unit previous movement direction (anti ping-pong)
+        self._last_seen_enemies = {}
 
     # -- selection -------------------------------------------------------
 
@@ -91,7 +95,8 @@ class SkillManager:
         self.skill_start_step = None
         self.elapsed_steps = 0
         self.assigned_units = []
-        self.target_assignments = {}
+        if self.current_skill != ADAPTIVE_FOCUS_FIRE:
+            self.target_assignments = {}
         self.termination_reason = None
         self.retreat_units = []
         self.cover_units = []
@@ -107,6 +112,21 @@ class SkillManager:
                 and self.termination_reason is None)
 
     # -- execution -------------------------------------------------------
+
+    def _record_diagnostics(self, result, telemetry):
+        """Preserve allocator diagnostics in the actual skill_step event."""
+        for key in ("immediate_damage", "window_only_damage", "movement_diagnostics"):
+            telemetry[key] = result.get(key, {})
+        for key, parameter in (("window_fire_enabled", "window_fire"),
+                               ("target_scoring_enabled", "target_scoring"),
+                               ("range_preserving_move_enabled", "range_preserving_move")):
+            telemetry[key] = result.get(key, bool(self.combat_params.get(parameter)))
+        for key in ("immediate_damage", "window_only_damage"):
+            self.stats[key] += sum(telemetry[key].values())
+        self.stats["movement_evaluations"] += len(telemetry["movement_diagnostics"])
+        self.stats["kept_attack_positions"] += sum(
+            row.get("reason") == "keep_attack_position"
+            for row in telemetry["movement_diagnostics"].values())
 
     def step(self, payload, n_agents):
         """Run one local decision step of the active skill on a fresh snapshot.
@@ -156,6 +176,7 @@ class SkillManager:
                      "unknown_damage_attackers": result["unknown_damage_attackers"],
                      "unassigned_units": result["unassigned_units"],
                      "fallback_actions": result["fallback_actions"]}
+        self._record_diagnostics(result, telemetry)
         if result["terminated"]:
             self._terminate(result["termination_reason"])
         elif self.elapsed_steps >= self.max_steps:
@@ -215,6 +236,7 @@ class SkillManager:
                      "cover_estimated_overkill": result["cover_overkill"],
                      "safe_streak": self.safe_streak,
                      "safe_streak_required": self.safe_streak_required}
+        self._record_diagnostics(result, telemetry)
         if result["terminated"] and result["termination_reason"] != "no_retreat_needed":
             self._terminate(result["termination_reason"])
         elif self.safe_streak >= self.safe_streak_required:
@@ -298,6 +320,12 @@ class SkillManager:
         if damage_observed:
             self.stall_steps = 0
             self.contacted = True  # Observable damage proves contact.
+            # Damage describes the interval that just finished, before this
+            # step's role selection. Delayed hits during retreat/recovery count.
+            # This is team-observed progress, not per-unit damage attribution.
+            for history in self.unit_states.values():
+                history["progress_since_retreat"] = True
+                history["retreat_cycles"] = 0
         elif self.contacted and state["visible_enemies"] and overlap:
             self.stall_steps += 1
         if not self.contacted and state["visible_enemies"] and any(
@@ -306,12 +334,30 @@ class SkillManager:
                 for relation in row.values()):
             self.contacted = True  # Visible enemy plus a legal attack edge = engagement.
         self._last_enemy_health = current_health
+        loop = state["game_loop"]
+        for enemy, unit in state["visible_enemies"].items():
+            self._last_seen_enemies[enemy] = {"position": list(unit["position"]), "game_loop": loop}
+        ttl = self.adaptive_params["search_memory_steps"] * state.get("step_mul", 8)
+        self._last_seen_enemies = {
+            e: record for e, record in self._last_seen_enemies.items()
+            if 0 <= loop - record["game_loop"] <= ttl}
+        search_hint = None
+        if not state["visible_enemies"] and self._last_seen_enemies:
+            enemy, record = max(self._last_seen_enemies.items(),
+                                key=lambda item: (item[1]["game_loop"], -int(item[0][1:])))
+            search_hint = {**record, "enemy": enemy, "age_loops": loop - record["game_loop"]}
+            state = {**state, "search_hint": search_hint}
 
         result = allocate_adaptive_focus_fire(
             state, n_agents, unit_states=self.unit_states, all_in=self.all_in,
             stall=self.stall_steps, contacted=self.contacted, posture=self.posture,
             parameters={**self.adaptive_params, **self.combat_params},
-            previous_attack_assignments=self.target_assignments or None)
+            previous_attack_assignments=self.target_assignments or None,
+            move_history=self._last_move)
+        for actor in result["roles"]:
+            action = result["actions"][int(actor[1:])]
+            if action in (2, 3, 4, 5):
+                self._last_move[actor] = action
         all_in_started_now = result["all_in"] and not self.all_in
         previous_roles = {a: v.get("role") for a, v in self.unit_states.items()}
         retreat_ended = sorted((a for a, role in result["roles"].items()
@@ -329,6 +375,7 @@ class SkillManager:
                    ("adaptive_retreat_steps" if result["retreat_units"]
                     else "adaptive_engage_steps")] += 1
         self.stats["adaptive_retreat_unit_steps"] += len(result["retreat_units"])
+        self.stats["adaptive_recovery_unit_steps"] += len(result["reentry_decisions"])
         self.stats["adaptive_reengagements"] += len(result["reengaged"])
         if isinstance(result.get("predicted_damage"), dict):
             self.stats["predicted_damage"] += sum(result["predicted_damage"].values())
@@ -349,12 +396,15 @@ class SkillManager:
                     unit_state["retreat_steps"] = 1
                 else:
                     unit_state["retreat_steps"] += 1
+            elif role == "recover":
+                unit_state["recover_steps"] = unit_state.get("recover_steps", 0) + 1
             else:
                 if unit_state.get("role") == "retreat":
+                    if not self.combat_params.get("range_preserving_move"):
+                        unit_state["retreat_steps"] = 0
+                if role in ("attack", "all_in_attack"):
                     unit_state["retreat_steps"] = 0
-                    unit_state["progress_since_retreat"] = False
-                if damage_observed and role in ("attack", "all_in_attack"):
-                    unit_state["progress_since_retreat"] = True
+                    unit_state["recover_steps"] = 0
             unit_state["role"] = role
         self.unit_states = {a: v for a, v in self.unit_states.items()
                             if a in state["allies"] and state["allies"][a]["alive"]}
@@ -378,7 +428,12 @@ class SkillManager:
                      "all_in_started_now": result["all_in_reason"] if all_in_started_now else None,
                      "retreat_ended": retreat_ended,
                      "retreat_state": {a: dict(self.unit_states.get(a, {}))
-                                       for a in result["retreat_units"]}}
+                                       for a in result["retreat_units"]},
+                     "reentry_decisions": result["reentry_decisions"],
+                     "search_hint": search_hint,
+                     "observed_team_damage_progress": damage_observed,
+                     "progress_basis": "visible enemy health decrease in the preceding interval"}
+        self._record_diagnostics(result, telemetry)
         if result["terminated"]:
             self._terminate(result["termination_reason"])
         elif self.elapsed_steps >= self.max_steps:

@@ -102,12 +102,20 @@ def _attacker_order(state, actor, enemy_id, relation, damage, previous_assignmen
                     parameters=None):
     """Deterministic attacker preference for one target (smaller is better).
 
-    Balanced ordering: window fire opportunity first, then actual range and
+    With either new combat flag on: window fire opportunity first, then actual range and
     position, then expected damage contribution, then the (demoted) bonus for
     keeping the previous target, then stable IDs. Keeping an old target must
     not mask a clearly better kill opportunity, so hysteresis no longer
     dominates.
     """
+    if not any((parameters or {}).get(key) for key in ("window_fire", "target_scoring")):
+        return (
+            0 if (previous_assignments or {}).get(actor) == enemy_id else 1,
+            0 if relation["in_weapon_range"] is True else 1,
+            0 if state["allies"][actor]["weapon_ready"] else 1,
+            -(damage if damage is not None else 0.0),
+            int(actor[1:]),
+        )
     fires_this_window = (can_fire_within_window(state, actor, enemy_id,
                                                  parameters=parameters)
                          if (parameters or {}).get("window_fire")
@@ -122,7 +130,7 @@ def _attacker_order(state, actor, enemy_id, relation, damage, previous_assignmen
 
 
 def _target_order(state, enemy_id, priority_target, legal_attackers, damage_sum,
-                  parameters=None):
+                  parameters=None, one_shot=False):
     """Deterministic target priority (smaller is better).
 
     Base order: priority target, most attackers able to hit it, cheapest to
@@ -134,6 +142,9 @@ def _target_order(state, enemy_id, priority_target, legal_attackers, damage_sum,
     enemy = state["visible_enemies"][enemy_id]
     need = effective_health(enemy)
     attacks_to_kill = math.ceil(need / damage_sum) if damage_sum > 0 else float("inf")
+    if not (parameters or {}).get("target_scoring"):
+        return (0 if enemy_id == priority_target else 1, -legal_attackers,
+                attacks_to_kill, need, int(enemy_id[1:]))
     score = 0.0
     if (parameters or {}).get("target_scoring"):
         # Bounded, explainable terms on top of the base order.
@@ -146,8 +157,9 @@ def _target_order(state, enemy_id, priority_target, legal_attackers, damage_sum,
         score = round(-(0.5 * damage_taken + 0.3 * proximity - 0.2 * overkill), 3)
     return (
         0 if enemy_id == priority_target else 1,
-        -legal_attackers,
+        0 if one_shot else 1,  # A ready finisher beats merely having more attackers.
         attacks_to_kill,
+        -legal_attackers,
         score,
         need,
         int(enemy_id[1:]),
@@ -161,6 +173,7 @@ def target_priority(state, priority_target=None, previous_assignments=None, para
     rows = []
     for enemy_id in state["visible_enemies"]:
         legal = ready_damage = 0
+        one_shot = False
         for actor, actor_relations in relations.items():
             relation = actor_relations.get(enemy_id)
             if relation is None:
@@ -171,9 +184,26 @@ def target_priority(state, priority_target=None, previous_assignments=None, para
                     damage = expected_damage(state, actor, enemy_id)
                     if damage is not None:
                         ready_damage += damage
+                        one_shot = one_shot or damage >= effective_health(state["visible_enemies"][enemy_id])
         rows.append((_target_order(state, enemy_id, priority_target, legal, ready_damage,
-                                   parameters), enemy_id))
-    return [enemy_id for _, enemy_id in sorted(rows)]
+                                   parameters, one_shot), enemy_id))
+    ordered = [enemy_id for _, enemy_id in sorted(rows)]
+    if (parameters or {}).get("target_scoring") and previous_assignments and len(ordered) > 1:
+        # Keep an established focus unless a finisher/cheaper volley or a
+        # material health advantage justifies changing it. Explicit priority
+        # and one-shot opportunities always win over this hysteresis.
+        keys = {enemy: key for key, enemy in rows}
+        counts = {enemy: sum(target == enemy for target in previous_assignments.values())
+                  for enemy in ordered}
+        old = max(ordered, key=lambda e: (counts[e], -int(e[1:])))
+        best = ordered[0]
+        if (counts[old] and old != best and keys[old][:3] == keys[best][:3]
+                and keys[old][3] < 0
+                and effective_health(state["visible_enemies"][best])
+                >= effective_health(state["visible_enemies"][old]) * 0.8):
+            ordered.remove(old)
+            ordered.insert(0, old)
+    return ordered
 
 
 def allocate_focus_fire(state, n_agents, priority_target=None,
@@ -321,6 +351,9 @@ def fallback_action(state, actor):
         def move_key(action_id):
             entry = moves[action_id]
             distances = list(entry["distances_to_visible_enemies"].values())
+            hint = state.get("search_hint")
+            if not distances and hint:
+                return (math.dist(entry["destination"], hint["position"]), int(action_id))
             return (min(distances) if distances else entry["distance_to_search_location"],
                     int(action_id))
         return int(min(moves, key=move_key))

@@ -142,3 +142,39 @@ py -3.10 jev_star.py micro-suite --all-maps --policies jev --episodes 3 --seed 1
 `SMAC_HARD_maps/` 集中保存全部 35 张注册地图，包括原上游旧目录中的地图。环境使用本目录自带且经修改的 `pysc2/`；不要用 pip 安装的另一份 PySC2 替代它。
 
 结果见 [实验记录](../docs/experiments.md)，安装和密钥配置见 [总说明](../README.md#简体中文)。
+
+### 2026-10-20 技能评分修复
+
+- AdaptiveFocusFire 将完整战斗参数和局内移动历史传给撤退执行器，启用
+  `--adaptive-range-preserving-move` 后实际使用新评分；CoverRetreat 的掩护集火也接收战斗开关。
+- TacticalReposition 使用同一目标函数比较原地与四个合法移动位置。只有严格改善才建议移动，
+  否则继续攻击分配，不生成 Stop 指令；紧急撤退保留选择最佳合法移动的语义。
+- 关闭 window-fire 与 target-scoring 时恢复原有集火攻击者排序：
+  旧目标、射程、武器就绪、伤害、单位 ID。关闭 target-scoring 时保留旧目标排序元组。
+- `skill_step` 持久化 `immediate_damage`、`window_only_damage`、三个开关状态、
+  `movement_diagnostics`（候选/原地分数、建议动作、保留原地原因以及 Adaptive 撤退价值判断）。
+  总结增加预算和移动评估计数。预算和位置评分都是估计，不代表实测造成或避免的伤害。
+
+修复后本项目 274 项离线测试通过。相邻 `smacv2_jev_adapter` 直接加载这些技能，
+完成了 native 同兵种属性统一的 Protoss 5v5 十局测试，纯 Adaptive Skill 为 4 胜 6 负。
+详细日志、回放和配对审计位于该适配项目
+`runs/native-5v5-adaptive-skill-n10-seed100/`。
+
+### 后续轨迹问题修复
+
+在上述轨迹诊断之后，增强模式进一步调整：
+
+- 移动评分按 `movement_speed_native × step_mul / 16` 估算一个窗口的可达位置，
+  上限为命令距离；同时检查原生射程及动作候选距离，不将名义终点当作实际到达点。
+- TacticalReposition 拒绝“丢失己方攻击候选、却未减少敌方武器覆盖”的方向。
+  已撤出攻击候选而仍在冷却的单位可进入最多两步 `recover`，以横向移动或有意 Stop
+  恢复冷却，随后重新接敌；不将 Stop 当作保持原攻击命令的 no-op。
+- `target_scoring` 开启时优先安排可在当前窗口完成的一击击杀，再比较集火成本；
+  无明确收益时保留当前集火目标。关闭此开关仍保留原目标排序。
+- 实际可见伤害进展在当前步骤角色选择之前记账；不漏掉在撤退/恢复观察帧到达的伤害。
+  这是队伍进展，不是逐单位伤害归因。
+- Adaptive 窗口重新激活时保留集火历史；每局重置。失视后的最近位置最多保留4个窗口，
+  只用于搜索移动，不生成对隐藏目标的攻击。
+
+新增的回归场景在 `tests/test_jev_trajectory_fixes.py`。
+SMACv2 观察生成的修复与该项目独立，见相邻适配项目的 `tests/test_visibility.py`。

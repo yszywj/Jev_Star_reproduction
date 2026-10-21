@@ -29,6 +29,8 @@ Model assumptions and scope (first version):
 from .combat_timing import can_fire_within_window
 from .cover_retreat import PARAMS as COVER_PARAMS, detect_retreat_candidates, select_retreat_action
 from .focus_fire import allocate_focus_fire, expected_damage, fallback_action
+from .movement_scoring import predicted_move, threat_count, score_movement_candidate
+from .combat_timing import window_loops
 
 PARAMS = {
     "max_retreat_steps": 2,       # per unit, per retreat episode
@@ -37,6 +39,8 @@ PARAMS = {
     "max_retreat_cycles": 3,      # per unit: unproductive retreat episodes before calling it a loop
     "disable_retreat": False,     # ablation: no local retreats at all
     "disable_all_in": False,      # ablation: never enter All-in
+    "max_recover_steps": 2,       # brief cooldown recovery after leaving attack candidates
+    "search_memory_steps": 4,     # remembered positions are search hints, never attack targets
 }
 
 # Postures only tune the explainable thresholds; one template, three configs.
@@ -104,7 +108,7 @@ def evaluate_retreat_value(state, actor, retreat_move, unit_state, posture="bala
     posture_params = POSTURE_PARAMS[posture]
     unit = state["allies"][actor]
     if unit_state.get("retreat_steps", 0) >= params["max_retreat_steps"]:
-        if _has_kill_opportunity(state, actor):
+        if _has_kill_opportunity(state, actor, parameters):
             return False, "kill_opportunity"
         return False, "retreat_cap_reached"
     if _has_kill_opportunity(state, actor, parameters):
@@ -128,8 +132,46 @@ def evaluate_retreat_value(state, actor, retreat_move, unit_state, posture="bala
     if retreat_move is None:
         return False, "no_safe_move"
     if not _legal_attack_targets(state, actor):
+        if params.get("range_preserving_move"):
+            # Hand off to bounded recovery/re-entry instead of starting a
+            # fresh retreat or immediately reversing while still on cooldown.
+            return False, "cooldown_recovery" if (
+                unit_state.get("role") in ("retreat", "recover")
+                and unit["weapon_cooldown_loops"] > window_loops(state, parameters)
+            ) else "reentry_required"
         return False, "cannot_reengage"
     return True, "cooldown_or_out_of_range"
+
+
+def recovery_action(state, actor, history, previous_move, parameters):
+    """Brief non-reversing recovery outside the attack mask, then re-enter.
+
+    A deliberate Stop can hold position while the weapon recovers. It is not
+    a no-op and is only used when no attack is currently legal.
+    """
+    if (history.get("role") not in ("retreat", "recover")
+            or history.get("recover_steps", 0) >= parameters["max_recover_steps"]
+            or _legal_attack_targets(state, actor)
+            or not state["visible_enemies"]
+            or state["allies"][actor]["weapon_cooldown_loops"] <= window_loops(state, parameters)):
+        return None
+    opposite = {2: 3, 3: 2, 4: 5, 5: 4}.get(previous_move)
+    origin = state["allies"][actor]["position"]
+    exposure = threat_count(state, actor, origin, parameters)
+    target = min(state["relations"].get(actor, {}),
+                 key=lambda e: state["relations"][actor][e]["distance"], default=None)
+    options = []
+    for action in state.get("movement_candidates", {}).get(actor, {}):
+        # Lateral moves avoid both immediate reversal and extending the same
+        # retreat past its cap. Holding is preferable to a worse exposure.
+        if int(action) in (previous_move, opposite):
+            continue
+        move = predicted_move(state, actor, action)
+        if threat_count(state, actor, move["destination"], parameters) <= exposure:
+            options.append((score_movement_candidate(state, actor, action, target,
+                                                      "tactical", parameters, previous_move),
+                            int(action)))
+    return min(options)[1] if options else 1
 
 
 def should_enter_all_in(state, stall, contacted, unit_states, heal_capacity,
@@ -181,7 +223,7 @@ def should_enter_all_in(state, stall, contacted, unit_states, heal_capacity,
 
 def allocate_adaptive_focus_fire(state, n_agents, unit_states=None, all_in=False,
                                  stall=0, contacted=False, posture="balanced",
-                                 parameters=None, previous_attack_assignments=None):
+                                 parameters=None, previous_attack_assignments=None, move_history=None):
     """One AdaptiveFocusFire decision step on a fresh snapshot.
 
     ``unit_states`` carries per-unit role history (retreat step counts and
@@ -201,15 +243,11 @@ def allocate_adaptive_focus_fire(state, n_agents, unit_states=None, all_in=False
         all_in_now, all_in_reason = should_enter_all_in(state, stall, contacted,
                                                         unit_states, heal_capacity, params)
 
-    retreat_units, retreat_actions, retreat_reasons = {}, {}, {}
+    retreat_units, retreat_actions, retreat_reasons, movement_diagnostics = {}, {}, {}, {}
     if not all_in_now and not params["disable_retreat"]:
         # Danger thresholds follow the same risk_threshold CLI knob as
         # CoverRetreat when the caller supplies one.
-        cover_parameters = (
-            {"risk_threshold": params["risk_threshold"]}
-            if "risk_threshold" in params
-            else None
-        )
+        cover_parameters = {**COVER_PARAMS, **params}
         endangered = detect_retreat_candidates(state, cover_parameters)
         for actor in sorted(endangered, key=lambda a: int(a[1:])):
             unit = state["allies"][actor]
@@ -220,11 +258,15 @@ def allocate_adaptive_focus_fire(state, n_agents, unit_states=None, all_in=False
                              if (unit["health"] + unit["shield"]) / maximum < params.get("emergency_ratio", 0.15)
                              or recent_loss >= params.get("emergency_recent_loss", 0.5)
                              else "tactical")
-            move, move_reason, _ = select_retreat_action(
-                state, actor, {actor}, cover_parameters, movement_mode=movement_mode)
+            move, move_reason, detail = select_retreat_action(
+                state, actor, {actor}, cover_parameters, movement_mode=movement_mode,
+                previous_action=(move_history or {}).get(actor))
             value, reason = evaluate_retreat_value(
                 state, actor, move, unit_states.get(actor, DEFAULT_UNIT_STATE),
                 posture, params)
+            movement_diagnostics[actor] = {
+                **detail, "movement_mode": movement_mode, "reason": move_reason,
+                "proposed_action": move, "retreat_accepted": value, "retreat_value_reason": reason}
             if value:
                 retreat_units[actor] = True
                 retreat_actions[actor] = move
@@ -255,7 +297,7 @@ def allocate_adaptive_focus_fire(state, n_agents, unit_states=None, all_in=False
     else:
         attack_assignments = {}
 
-    actions, roles = [0] * n_agents, {}
+    actions, roles, reentry_decisions = [0] * n_agents, {}, {}
     for actor, unit in allies.items():
         index = int(actor[1:])
         if index >= n_agents or not unit["alive"]:
@@ -270,12 +312,19 @@ def allocate_adaptive_focus_fire(state, n_agents, unit_states=None, all_in=False
             actions[index] = fallback_action(state, actor) or 1  # Support: heal or move.
             roles[actor] = "support"
         else:
-            actions[index] = fallback_action(state, actor) or 1  # Reposition: explicit legal move.
-            roles[actor] = "reposition"
+            recover = recovery_action(
+                state, actor, unit_states.get(actor, {}), (move_history or {}).get(actor), params
+            ) if params.get("range_preserving_move") and not all_in_now else None
+            if recover is not None:
+                actions[index], roles[actor] = recover, "recover"
+                reentry_decisions[actor] = {"reason": "bounded_cooldown_recovery", "action": recover}
+            else:
+                actions[index] = fallback_action(state, actor) or 1
+                roles[actor] = "reposition"
 
     reengaged = sorted((a for a in roles
                         if roles[a] in ("attack", "all_in_attack")
-                        and unit_states.get(a, DEFAULT_UNIT_STATE).get("role") == "retreat"),
+                        and unit_states.get(a, DEFAULT_UNIT_STATE).get("role") in ("retreat", "recover")),
                        key=lambda a: int(a[1:]))
     reason = None
     if not any(u["alive"] for u in allies.values()):
@@ -298,6 +347,13 @@ def allocate_adaptive_focus_fire(state, n_agents, unit_states=None, all_in=False
         "reengaged": reengaged,
         "predicted_damage": (attack_result or {}).get("predicted_damage"),
         "estimated_overkill": (attack_result or {}).get("estimated_overkill"),
+        "immediate_damage": (attack_result or {}).get("immediate_damage", {}),
+        "window_only_damage": (attack_result or {}).get("window_only_damage", {}),
+        "window_fire_enabled": bool(params.get("window_fire")),
+        "target_scoring_enabled": bool(params.get("target_scoring")),
+        "range_preserving_move_enabled": bool(params.get("range_preserving_move")),
+        "movement_diagnostics": movement_diagnostics,
+        "reentry_decisions": reentry_decisions,
         "focus_fire_terminated": (attack_result or {}).get("termination_reason"),
         "terminated": reason is not None,
         "termination_reason": reason,

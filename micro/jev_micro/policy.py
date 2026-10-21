@@ -161,6 +161,7 @@ def build_request(env, static_data, model, episode, previous_health=None, previo
                 "weapon_range_status": own_status, "native_weapon_range": attack_range,
                 "in_enemy_weapon_range": enemy_in_range, "enemy_weapon_range_status": enemy_status,
                 "smac_attack_available": available,
+                "smac_attack_distance_limit": 6,
                 "smac_center_distance_allowed": d <= 6,
                 "approach_needed": not in_range if in_range is not None and own_status != "no_compatible_weapon" else None,
             }

@@ -106,6 +106,7 @@ async def run(args, api_key):
                     "jev_micro/catalog.py", "jev_micro/environment.py", "jev_micro/scenario.py", "jev_micro/feedback.py",
                     "jev_micro/skills/focus_fire.py", "jev_micro/skills/cover_retreat.py",
                     "jev_micro/skills/heal_assign.py", "jev_micro/skills/adaptive_focus_fire.py",
+                    "jev_micro/skills/movement_scoring.py", "jev_micro/skills/combat_timing.py",
                     "jev_micro/skill_policy.py", "jev_micro/skill_manager.py",
                     "smac_hard/env/starcraft2/starcraft2.py", "pysc2/lib/remote_controller.py")
     settings["source_sha256"] = {p: hashlib.sha256((REPO / p).read_bytes()).hexdigest() for p in source_files}
